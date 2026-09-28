@@ -1,7 +1,10 @@
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using Content.Shared._CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.Dropship.AttachmentPoint;
+using Content.Shared.CMU14.Dropship.MultiDeck; // CMU14
+using Content.Shared.Buckle.Components; // CMU14
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
 using Content.Shared._RMC14.Areas;
 using Content.Shared._RMC14.Atmos;
 using Content.Shared._RMC14.Camera;
@@ -24,11 +27,13 @@ using Content.Shared._RMC14.Rangefinder;
 using Content.Shared._RMC14.Rules;
 using Content.Shared._RMC14.Weapons.Ranged;
 using Content.Shared.Administration.Logs;
-using Content.Shared.AU14.Round;
+using Content.Shared.CMU14.Round;
 using Content.Shared.Chat;
 using Content.Shared.Coordinates;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Components;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Database;
 using Content.Shared.Doors.Components;
 using Content.Shared.Doors.Systems;
@@ -87,7 +92,6 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
     [Dependency] private EntityLookupSystem _entityLookup = default!;
     [Dependency] private SharedEyeSystem _eye = default!;
     [Dependency] private FireMissionSystem _fireMission = default!;
-    [Dependency] private IMapManager _mapManager = default!;
     [Dependency] private NameModifierSystem _name = default!;
     [Dependency] private INetManager _net = default!;
     [Dependency] private SharedOnCollideSystem _onCollide = default!;
@@ -98,7 +102,6 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
     [Dependency] private PowerLoaderSystem _powerloader = default!;
     [Dependency] private IPrototypeManager _prototypes = default!;
     [Dependency] private IRobustRandom _random = default!;
-    [Dependency] private SharedRMCCameraSystem _rmcCamera = default!;
     [Dependency] private SharedRMCFlammableSystem _rmcFlammable = default!;
     [Dependency] private SharedRMCExplosionSystem _rmcExplosion = default!;
     [Dependency] private RMCImplosionSystem _rmcImplosion = default!;
@@ -317,6 +320,9 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
     private void OnTerminalMapInit(Entity<DropshipTerminalWeaponsComponent> ent, ref MapInitEvent args)
     {
+        if (_net.IsClient)
+            return;
+
         var targets = new List<TargetEnt>();
         var targetsQuery = EntityQueryEnumerator<DropshipTargetComponent>();
 
@@ -359,6 +365,9 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
     private void OnDropshipTargetMapInit(Entity<DropshipTargetComponent> ent, ref MapInitEvent args)
     {
+        if (_net.IsClient)
+            return;
+
         var netEnt = GetNetEntity(ent);
         var terminals = EntityQueryEnumerator<DropshipTerminalWeaponsComponent>();
         while (terminals.MoveNext(out var uid, out var terminal))
@@ -377,32 +386,33 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             var creatorFaction = string.IsNullOrWhiteSpace(ent.Comp.CreatorFaction) ? null : ent.Comp.CreatorFaction;
 
             // If the target is faction-bound, only add it to consoles of that faction
-            if (!string.IsNullOrEmpty(creatorFaction))
+            if (!string.IsNullOrEmpty(creatorFaction) &&
+                (string.IsNullOrEmpty(consoleFaction) ||
+                 !creatorFaction.Equals(consoleFaction, StringComparison.OrdinalIgnoreCase)))
             {
-                if (string.IsNullOrEmpty(consoleFaction) ||
-                    !creatorFaction.Equals(consoleFaction, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+                continue;
             }
 
             targets.Add(new TargetEnt(netEnt, ent.Comp.Abbreviation));
             Dirty(uid, terminal);
         }
 
-        if (!TryComp(ent, out MetaDataComponent? metaData) || metaData.EntityPrototype == null)
-            return;
-
-        var prototype = metaData.EntityPrototype.ID;
-
-        var camera = EnsureComp<RMCCameraComponent>(ent);
-        _rmcCamera.SetCameraName(ent, $"{Name(ent)} [{ent.Comp.Abbreviation}]", camera);
-        _rmcCamera.SetCameraId(ent, prototype, camera);
-        _rmcCamera.RefreshCameras(prototype);
+        AddComp(ent, new RMCCameraComponent
+        {
+            Rename = false,
+            NameOverride = $"{Name(ent)} [{ent.Comp.Abbreviation}]",
+        }, true);
     }
 
     private void OnDropshipTargetRemove<T>(Entity<DropshipTargetComponent> ent, ref T args)
     {
+        // Terminal target lists and target-eye ownership are replicated,
+        // server-authoritative state. Targets routinely leave client PVS during
+        // map transfers and crashes; changing those lists client-side dirties
+        // predicted entities during rollback.
+        if (_net.IsClient)
+            return;
+
         var netUid = GetNetEntity(ent);
         var terminals = EntityQueryEnumerator<DropshipTerminalWeaponsComponent>();
         while (terminals.MoveNext(out var uid, out var terminal))
@@ -434,15 +444,11 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             Dirty(uid, terminal);
         }
 
-        if (_net.IsServer && TryComp(ent, out MetaDataComponent? metaData) && metaData.EntityPrototype is { } prototype)
+        if (_net.IsServer)
         {
             RemComp<RMCCameraComponent>(ent);
             RemComp<EyeComponent>(ent);
-            _rmcCamera.RefreshCameras(prototype);
         }
-
-        if (_net.IsClient)
-            return;
 
         foreach (var (_, eye) in ent.Comp.Eyes)
         {
@@ -452,6 +458,9 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
     private void OnDropshipTargetEyeRemove<T>(Entity<DropshipTargetEyeComponent> ent, ref T args)
     {
+        if (_net.IsClient)
+            return;
+
         if (TerminatingOrDeleted(ent.Comp.Target) ||
             !TryComp(ent.Comp.Target, out DropshipTargetComponent? target))
         {
@@ -697,7 +706,7 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
         }
 
         var offset = ClampOffset(ent);
-        var coordinates = _transform.GetMoverCoordinates(target).SnapToGrid(EntityManager, _mapManager).Offset(offset);
+        var coordinates = _transform.GetMoverCoordinates(target).SnapToGrid(EntityManager).Offset(offset);
         if (!CasDebug && !_area.CanCAS(coordinates))
         {
             var msg = Loc.GetString("rmc-laser-designator-not-cas");
@@ -730,7 +739,7 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
         var time = _timing.CurTime;
 
-        var spawnTarget = _transform.GetMoverCoordinates(active).SnapToGrid(EntityManager, _mapManager);
+        var spawnTarget = _transform.GetMoverCoordinates(active).SnapToGrid(EntityManager);
         if (ammo.Explosion != null && HasNonDeletableWallOnTile(spawnTarget))
             spawnTarget = FindAlternateLandingTile(spawnTarget, 3);
 
@@ -1028,6 +1037,8 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             var paraDrop = EnsureComp<ActiveParaDropComponent>(dropship);
             paraDrop.DropTarget = ent.Comp.Target;
             Dirty(dropship, paraDrop);
+            var changed = new DropshipParadropChangedEvent(true);
+            RaiseLocalEvent(dropship, ref changed);
         }
         else
         {
@@ -1110,6 +1121,17 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             dropship.Comp.AttachmentPoints.Count == 0)
             return;
 
+        if (!TryComp(selectedSystem, out RMCOrbitalDeployerComponent? deployer))
+            return;
+
+        var point = Transform(selectedSystem.Value).ParentUid;
+        if (HasComp<GunshipUtilityAttachmentPointComponent>(point))
+        {
+            _rmcOrbitalDeployable.TryDeploy(selectedSystem.Value, selectedSystem.Value, args.Actor, deployer);
+            RefreshWeaponsUI(ent);
+            return;
+        }
+
         if (ent.Comp.Target is not { } target)
             return;
 
@@ -1125,9 +1147,6 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
                 return;
             }
         }
-
-        if (!TryComp(selectedSystem, out RMCOrbitalDeployerComponent? deployer))
-            return;
 
         _rmcOrbitalDeployable.TryDeploy(selectedSystem.Value, target,  args.Actor, deployer);
 
@@ -1345,7 +1364,7 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
         if (ent.Comp.Abbreviation == null)
             return;
 
-        args.AddModifier(ent.Comp.Abbreviation);
+        args.AddModifier("rmc-laser-designator-signal-flare-name", extraArgs: ("id", ent.Comp.Abbreviation));
     }
 
     private void UpdateTarget(Entity<DropshipTerminalWeaponsComponent> ent, EntityUid target)
@@ -1556,7 +1575,8 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             return false;
 
         var xform = Transform(ent);
-        if (!CasDebug && !HasComp<RMCPlanetComponent>(xform.GridUid))
+        // CMU14: aircraft landing and protected CAS.
+        if (!CasDebug && !IsPlanetTarget(xform))
             return false;
         if (!ent.Comp.IsTargetableByWeapons)
         {
@@ -1564,6 +1584,24 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
         }
 
         return true;
+    }
+
+    // CMU14: aircraft landing and protected CAS.
+    private bool IsPlanetTarget(TransformComponent xform)
+    {
+        if (HasComp<RMCPlanetComponent>(xform.GridUid) || HasComp<RMCPlanetComponent>(xform.MapUid))
+            return true;
+
+        if (xform.MapUid is not { } map || !_zLevels.TryGetZNetwork(map, out var network))
+            return false;
+
+        foreach (var (_, member) in _zLevels.GetOrderedNetworkMaps(network.Value))
+        {
+            if (HasComp<RMCPlanetComponent>(member))
+                return true;
+        }
+
+        return false;
     }
 
     public string GetUserAbbreviation(EntityUid user, int id)
@@ -1729,6 +1767,12 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             if (_net.IsClient)
                 continue;
 
+            if (!flight.Target.IsValid(EntityManager)) // CMU14: the target grid can be deleted before the marker spawns
+            {
+                QueueDel(uid);
+                continue;
+            }
+
             if (!flight.WarnedSound)
             {
                 flight.WarnedSound = true;
@@ -1796,7 +1840,15 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
                 var landing = flight.Target.Offset(spread);
 
-                var targetMap = _transform.ToMapCoordinates(landing.SnapToGrid(EntityManager, _mapManager));
+                // Dispersion can move a permitted target underneath a protected
+                // ceiling. Check the actual impact before applying any payload.
+                if (!CasDebug && !_area.CanCAS(landing))
+                    continue;
+
+                var targetMap = _transform.ToMapCoordinates(landing.SnapToGrid(EntityManager));
+        // CMU14: publish the actual dispersed payload impact for fighter effects.
+        var impact = new DropshipWeaponImpactEvent(targetMap);
+        RaiseLocalEvent(uid, ref impact);
 
                 foreach (var effect in flight.ImpactEffects)
                 {
@@ -1845,38 +1897,42 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
                                 break;
 
                             var tile = _random.PickAndTake(tiles);
-                            var coords = flight.Target.Offset(tile);
+                            // CMU14: aircraft landing and protected CAS.
+                            var coords = landing.Offset(tile);
                             _rmcFlammable.SpawnFire(coords,
                                 flight.Fire.Type,
                                 chain,
                                 flight.Fire.Range,
                                 flight.Fire.Intensity,
                                 flight.Fire.Duration,
-                                out _
+                                out _,
+                                canSpawn: CanSpawnCASFire
                             );
                         }
                     }
                     else
                     {
                         _rmcFlammable.SpawnFireLines(flight.Fire.Type,
-                            flight.Target,
+                            landing,
                             flight.Fire.CardinalRange,
                             flight.Fire.OrdinalRange,
                             flight.Fire.Intensity,
-                            flight.Fire.Duration);
+                            flight.Fire.Duration,
+                            canSpawn: CanSpawnCASFire);
 
                         for (var x = -flight.Fire.Range; x <= flight.Fire.Range; x++)
                         {
                             for (var y = -flight.Fire.Range; y <= flight.Fire.Range; y++)
                             {
-                                var coords = flight.Target.Offset(new Vector2(x, y));
+                                var coords = landing.Offset(new Vector2(x, y));
                                 _rmcFlammable.SpawnFire(coords,
                                     flight.Fire.Type,
                                     chain,
                                     flight.Fire.Range,
                                     flight.Fire.Intensity,
                                     flight.Fire.Duration,
-                                    out _
+                                    out _,
+                                    canSpawn: CanSpawnCASFire
                                 );
                             }
                         }
@@ -1930,6 +1986,9 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
                _zLevels.DistanceToGround(uid, out _) <= 0;
     }
 
+    // CMU14: aircraft landing and protected CAS.
+    private bool CanSpawnCASFire(EntityCoordinates coordinates) => CasDebug || _area.CanCAS(coordinates);
+
     public static Angle GetImpactEffectRotation(Angle randomRotation, bool hasOccluder)
     {
         return hasOccluder
@@ -1972,7 +2031,7 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
 
     private EntityCoordinates FindAlternateLandingTile(EntityCoordinates desired, int maxRadius = 3)
     {
-        var origin = desired.SnapToGrid(EntityManager, _mapManager);
+        var origin = desired.SnapToGrid(EntityManager);
 
         for (var r = 1; r <= maxRadius; r++)
         {
@@ -2258,7 +2317,7 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
             return false;
         }
 
-        var targetCoordinates = _transform.GetMoverCoordinates(target).SnapToGrid(EntityManager, _mapManager).Offset(offset);
+        var targetCoordinates = _transform.GetMoverCoordinates(target).SnapToGrid(EntityManager).Offset(offset);
         if (!CanStartFireMission(dropship, targetCoordinates, user))
             return false;
 
@@ -2357,6 +2416,22 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
         if (!Resolve(weapon, ref weaponComp, false))
             return false;
 
+        // CMU14 Begin: fixed chin weapons require their dedicated gunnery station.
+        if (weaponComp.GunneryOnly && terminalComp?.Gunnery != true)
+        {
+            if (actor is { } operatorUid)
+                _popup.PopupEntity(Loc.GetString("cmu-mohawk-gunnery-only"), weapon, operatorUid);
+            return false;
+        }
+
+        if (weaponComp.GunneryOnly && actor is { } gunner &&
+            (!TryComp<BuckleComponent>(gunner, out var buckle) || !HasComp<MohawkGunnerySeatComponent>(buckle.BuckledTo)))
+        {
+            _popup.PopupEntity(Loc.GetString("cmu-mohawk-gunnery-seat"), weapon, gunner);
+            return false;
+        }
+        // CMU14 End
+
         if (strikeType == DropshipWeaponStrikeType.FireMission &&
             !CanFireMissionAt(targetCoordinates, actor))
         {
@@ -2382,6 +2457,12 @@ public abstract partial class SharedDropshipWeaponSystem : EntitySystem
     private bool CanFire(EntityUid uid, DropshipWeaponStrikeType strikeType, EntityUid? actor = null, int requiredShots = 1, DropshipWeaponComponent? weapon = null)
     {
         if (!Resolve(uid, ref weapon, false))
+            return false;
+
+        if (weapon.DirectFireOnly)
+            return false;
+
+        if (weapon.GunneryOnly && strikeType == DropshipWeaponStrikeType.FireMission) // CMU14: manual gunnery only
             return false;
 
         Entity<DropshipComponent> dropship = default;
@@ -2574,3 +2655,8 @@ public record struct DropshipWeaponShotEvent(
     RMCFire? Fire,
     int SoundEveryShots
 );
+
+// CMU14 event
+/// <summary>Raised at an actual dropship payload impact for world presentation.</summary>
+[ByRefEvent]
+public record struct DropshipWeaponImpactEvent(MapCoordinates Coordinates);

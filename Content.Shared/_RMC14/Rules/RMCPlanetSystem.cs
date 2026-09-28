@@ -1,6 +1,6 @@
 using System.Collections.Immutable;
 using System.Linq;
-using Content.Shared._CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
 using Content.Shared._RMC14.CCVar;
 using Content.Shared._RMC14.Power;
 using Content.Shared._RMC14.TacticalMap;
@@ -124,6 +124,10 @@ public sealed partial class RMCPlanetSystem : EntitySystem
         return IsOnPlanet(_transform.ToCoordinates(coordinates));
     }
 
+    // CMU14: endgame cleanup includes underground and elevated planet levels.
+    public bool IsOnPlanetLevel(TransformComponent xform)
+        => IsOnPlanet(xform) || TryGetPlanetSurfaceCoordinates(_transform.GetMapCoordinates(xform), out _);
+
     /// <summary>
     /// Resolves coordinates on a connected Z-level to the depth-zero planet map.
     /// Coordinates already on a planet map or grid are returned unchanged.
@@ -150,6 +154,10 @@ public sealed partial class RMCPlanetSystem : EntitySystem
 
     public bool TryGetOffset(MapCoordinates coordinates, out Vector2i offset)
     {
+        // All connected planet levels use the surface's targeting coordinate offset.
+        if (TryGetPlanetSurfaceCoordinates(coordinates, out var surfaceCoordinates))
+            coordinates = surfaceCoordinates;
+
         var entCoords = _transform.ToCoordinates(coordinates);
         if (_transform.GetGrid(entCoords) is { } gridId &&
             TryComp(gridId, out RMCPlanetComponent? gridPlanet))

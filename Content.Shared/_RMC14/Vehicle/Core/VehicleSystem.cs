@@ -10,6 +10,7 @@ using Content.Shared.Buckle;
 using Content.Shared.Buckle.Components;
 using Content.Shared.DoAfter;
 using Content.Shared.Ghost;
+using Content.Shared.Ghost.Components;
 using Content.Shared.Interaction;
 using Content.Shared.Maps;
 using Content.Shared.Mobs.Components;
@@ -52,7 +53,7 @@ public sealed partial class VehicleSystem : EntitySystem
     [Dependency] private MobStateSystem _mobState = default!;
     [Dependency] private SharedRMCPowerSystem _rmcPower = default!;
     [Dependency] private SharedTransformSystem _transform = default!;
-    [Dependency] private Content.Shared.Vehicle.VehicleSystem _vehicles = default!;
+    [Dependency] private Content.Shared.Vehicle.Systems.VehicleSystem _vehicles = default!;
     [Dependency] private VehicleLockSystem _vehicleLock = default!;
     [Dependency] private EntityLookupSystem _lookup = default!;
     [Dependency] private RMCMapSystem _rmcMap = default!;
@@ -60,6 +61,7 @@ public sealed partial class VehicleSystem : EntitySystem
 
     public override void Initialize()
     {
+        InitializeTankCookOff(); // CMU14: catastrophic tank destruction
         SubscribeLocalEvent<VehicleEnterComponent, ActivateInWorldEvent>(OnVehicleEnterActivate);
         SubscribeLocalEvent<VehicleEnterComponent, ComponentShutdown>(OnVehicleEnterShutdown);
         SubscribeLocalEvent<VehicleExitComponent, ActivateInWorldEvent>(OnVehicleExitActivate);
@@ -307,6 +309,12 @@ public sealed partial class VehicleSystem : EntitySystem
         var link = EnsureComp<VehicleInteriorLinkComponent>(mapUid);
         link.Vehicle = ent.Owner;
 
+        // CMU14: Opfor twins swap in first, purges shared
+        CaptureInteriorFaction(ent);
+        var swapEv = new VehicleInteriorLoadedEvent(ent.Owner, mapUid, interiorGrid, ent.Comp.InteriorFaction);
+        RaiseLocalEvent(ent.Owner, ref swapEv);
+        ConfigureInteriorFaction(ent, mapId);
+
         ProtectInteriorEntities(mapId);
         SpawnVehicleInteriorKey(ent.Owner, mapId);
 
@@ -480,7 +488,8 @@ public sealed partial class VehicleSystem : EntitySystem
         var vehiclePos = _transform.GetWorldPosition(vehicleXform);
         var userPos = _transform.GetWorldPosition(userXform);
         var delta = userPos - vehiclePos;
-        var localDelta = (-vehicleXform.LocalRotation).RotateVec(delta);
+        var vehicleRotation = _transform.GetWorldRotation(vehicleXform);
+        var localDelta = (-vehicleRotation).RotateVec(delta);
 
         if (bypassEntry)
         {
@@ -1024,6 +1033,10 @@ public sealed partial class VehicleSystem : EntitySystem
 
     private bool IsExitBlockedByLock(EntityUid vehicle, EntityUid user)
     {
+        // CMU14: occupants may escape during the ignition warning.
+        if (HasComp<ActiveTankCookOffComponent>(vehicle))
+            return false;
+
         if (HasComp<GhostComponent>(user))
             return false;
 

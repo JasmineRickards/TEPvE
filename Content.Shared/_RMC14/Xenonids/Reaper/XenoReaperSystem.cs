@@ -8,12 +8,14 @@ using Content.Shared._RMC14.Slow;
 using Content.Shared._RMC14.Weapons.Melee;
 using Content.Shared._RMC14.Xenonids.Hive;
 using Content.Shared.Alert;
+using Content.Shared.Body;
 using Content.Shared.Body.Components;
 using Content.Shared.Body.Part;
 using Content.Shared.Body.Systems;
 using Content.Shared.Coordinates;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Systems;
 using Content.Shared.DoAfter;
 using Content.Shared.Movement.Events;
 using Content.Shared.Movement.Systems;
@@ -21,6 +23,7 @@ using Content.Shared.Mobs.Systems;
 using Content.Shared.Popups;
 using Content.Shared.Rounding;
 using Content.Shared.StatusEffectNew;
+using Content.Shared.Stunnable;
 using Content.Shared.Throwing;
 using Content.Shared.Weapons.Melee.Events;
 using Robust.Shared.Audio.Systems;
@@ -42,7 +45,6 @@ public sealed partial class XenoReaperSystem : EntitySystem
     [Dependency] private SharedDoAfterSystem _doAfter = default!;
     [Dependency] private EntityLookupSystem _entityLookup = default!;
     [Dependency] private SharedXenoHiveSystem _hive = default!;
-    [Dependency] private IMapManager _map = default!;
     [Dependency] private IGameTiming _timing = default!;
     [Dependency] private MobStateSystem _mobState = default!;
     [Dependency] private MovementSpeedModifierSystem _movementSpeed = default!;
@@ -76,6 +78,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
         SubscribeLocalEvent<XenoCarrionMantleComponent, CMGetArmorEvent>(OnCarrionMantleGetArmor);
         SubscribeLocalEvent<XenoCarrionMantleComponent, RefreshMovementSpeedModifiersEvent>(OnCarrionMantleRefreshSpeed);
         SubscribeLocalEvent<XenoCarrionMantleComponent, BeforeStatusEffectAddedEvent>(OnCarrionMantleBeforeStatus);
+        SubscribeLocalEvent<XenoCarrionMantleComponent, KnockDownAttemptEvent>(OnCarrionMantleKnockdownAttempt);
     }
 
     private void OnReaperMapInit(Entity<XenoReaperComponent> xeno, ref MapInitEvent args)
@@ -87,7 +90,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
 
     private void OnReaperRemove(Entity<XenoReaperComponent> xeno, ref ComponentRemove args)
     {
-        _alerts.ClearAlert(xeno, xeno.Comp.Alert);
+        _alerts.ClearAlert((xeno.Owner, null), xeno.Comp.Alert);
     }
 
     private void OnMeleeHit(Entity<XenoReaperComponent> xeno, ref MeleeHitEvent args)
@@ -97,7 +100,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
 
         foreach (var hit in args.HitEntities)
         {
-            if (!_xeno.CanAbilityAttackTarget(xeno, hit))
+            if (!_xeno.CanGainRewardsFromTarget(xeno, hit)) // CMU14: no rewards from vehicles
                 continue;
 
             AddFleshResin(xeno, xeno.Comp.MeleeGain);
@@ -156,7 +159,8 @@ public sealed partial class XenoReaperSystem : EntitySystem
         if (_net.IsServer)
             SpawnAttachedTo(xeno.Comp.RaptureEffect, args.Target.ToCoordinates());
 
-        AddFleshResin(xeno, xeno.Comp.RaptureGain);
+        if (_xeno.CanGainRewardsFromTarget(xeno, args.Target)) // CMU14: no rewards from vehicles
+            AddFleshResin(xeno, xeno.Comp.RaptureGain);
     }
 
     private void OnFleshBloomAction(Entity<XenoReaperComponent> xeno, ref XenoFleshBloomActionEvent args)
@@ -164,7 +168,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
         if (args.Handled || !HasFleshResinPopup(xeno, xeno.Comp.FleshBloomCost))
             return;
 
-        var coordinates = args.Target.SnapToGrid(EntityManager, _map);
+        var coordinates = args.Target.SnapToGrid(EntityManager);
         if (!coordinates.IsValid(EntityManager))
             return;
 
@@ -212,8 +216,8 @@ public sealed partial class XenoReaperSystem : EntitySystem
         if (args.Handled || !HasFleshResinPopup(xeno, xeno.Comp.RedGasCost))
             return;
 
-        var start = Transform(xeno).Coordinates.SnapToGrid(EntityManager, _map);
-        var target = args.Target.SnapToGrid(EntityManager, _map);
+        var start = Transform(xeno).Coordinates.SnapToGrid(EntityManager);
+        var target = args.Target.SnapToGrid(EntityManager);
         if (!start.IsValid(EntityManager) || !target.IsValid(EntityManager))
             return;
 
@@ -291,6 +295,11 @@ public sealed partial class XenoReaperSystem : EntitySystem
     {
         if (ent.Comp.ImmuneToStatuses.Contains(args.Effect.Id))
             args.Cancelled = true;
+    }
+
+    private void OnCarrionMantleKnockdownAttempt(Entity<XenoCarrionMantleComponent> ent, ref KnockDownAttemptEvent args)
+    {
+        args.Cancelled = true;
     }
 
     public override void Update(float frameTime)
@@ -433,7 +442,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
         for (var i = 0; i <= steps; i++)
         {
             var position = start.Position + direction * i;
-            var coordinates = new EntityCoordinates(start.EntityId, position).SnapToGrid(EntityManager, _map);
+            var coordinates = new EntityCoordinates(start.EntityId, position).SnapToGrid(EntityManager);
             if (path.Count == 0 || path[^1].Position != coordinates.Position)
                 path.Add(coordinates);
         }
@@ -493,7 +502,7 @@ public sealed partial class XenoReaperSystem : EntitySystem
 
         foreach (var offset in GetRedGasOffsets(width, perpendicular))
         {
-            var coordinates = center.Offset(offset).SnapToGrid(EntityManager, _map);
+            var coordinates = center.Offset(offset).SnapToGrid(EntityManager);
             if (!coordinates.IsValid(EntityManager))
                 continue;
 
@@ -689,6 +698,6 @@ public sealed partial class XenoReaperSystem : EntitySystem
         var max = _alerts.GetMaxSeverity(reaper.Comp.Alert);
         var severity = max - ContentHelpers.RoundToLevels(level, reaper.Comp.MaxFleshResin, max + 1);
         var message = $"{reaper.Comp.FleshResin} / {reaper.Comp.MaxFleshResin}";
-        _alerts.ShowAlert(reaper, reaper.Comp.Alert, (short) severity, dynamicMessage: message);
+        _alerts.ShowAlert((reaper.Owner, null), reaper.Comp.Alert, (short) severity, dynamicMessage: message);
     }
 }

@@ -9,6 +9,7 @@ using Content.Shared._RMC14.Xenonids.Neurotoxin;
 using Content.Shared.ActionBlocker;
 using Content.Shared.Coordinates;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Interaction.Events;
 using Content.Shared.Inventory.Events;
 using Content.Shared.Movement.Events;
@@ -78,7 +79,7 @@ public abstract partial class SharedParaDropSystem : EntitySystem
         if ((ent.Comp.Slots & args.SlotFlags) == 0)
             return;
 
-        EnsureComp<ParaDroppableComponent>(args.Equipee);
+        EnsureComp<ParaDroppableComponent>(args.EquipTarget);
     }
 
     private void OnGotUnEquipped(Entity<GrantParaDroppableComponent> ent, ref GotUnequippedEvent args)
@@ -89,7 +90,7 @@ public abstract partial class SharedParaDropSystem : EntitySystem
         if ((ent.Comp.Slots & args.SlotFlags) == 0)
             return;
 
-        RemComp<ParaDroppableComponent>(args.Equipee);
+        RemComp<ParaDroppableComponent>(args.EquipTarget);
     }
 
     private void OnAttemptCrashLand(Entity<CrashLandOnTouchComponent> ent, ref AttemptCrashLandEvent args)
@@ -314,10 +315,11 @@ public abstract partial class SharedParaDropSystem : EntitySystem
     private bool TryGetParaDropLocation(EntityCoordinates targetLocation, int dropScatter, out EntityCoordinates adjustedLocation)
     {
         adjustedLocation = default;
+        var targetMap = _transform.GetMapId(targetLocation); // CMU: scatter on the chosen AO only.
         var distressQuery = EntityQueryEnumerator<RMCPlanetComponent>();
         while (distressQuery.MoveNext(out var grid, out _))
         {
-            if (!TryComp<MapGridComponent>(grid, out var gridComp))
+            if (Transform(grid).MapID != targetMap || !TryComp<MapGridComponent>(grid, out var gridComp))
                 continue;
 
             var position = _mapSystem.LocalToTile(grid, gridComp, targetLocation);
@@ -334,7 +336,7 @@ public abstract partial class SharedParaDropSystem : EntitySystem
             }
 
             if (viableTiles.Count == 0)
-                return false;
+                continue; // CMU: another grid on this map may contain the target.
 
             var random = _random.Next(0, viableTiles.Count);
             adjustedLocation = _mapSystem.GridTileToLocal(grid, gridComp, viableTiles[random].GridIndices);

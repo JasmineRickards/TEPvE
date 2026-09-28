@@ -83,6 +83,20 @@
   - type: Corrodible
     isCorrodible: false
   - type: RMCMagneticItem
+  # cmu edit start
+  - type: CMUBackblast
+    nearEffect: CMUBackblastSmokeNear
+    farEffect: CMUBackblastSmokeFar
+  # cmu edit end
+  - type: InteractedBlacklist
+    blacklist:
+      components:
+      - Xeno
+      - CMUPathogenWalker
+#  - type: GunUserWhitelist # CMU14
+#    whitelist:
+#      components:
+#      - DemoSpecWhitelist
 
 - type: entity
   parent: [RMCBaseWeaponLauncher, RMCBaseAttachableHolder]
@@ -91,10 +105,10 @@
   description: "A German designed MANPAD system designed to replace the aging Russian-made 'spear' missile launchers. It offers reasonable air defence capabilities at the platoon-level for members of the UPPAC. This ones electronic systems seems to be taken off, rendering it as a 'Anti-Tank Weapon'"
   components:
   - type: Sprite
-    sprite: _AU14/Weapons/Guns/UPP/emblr/emblr_inhands.rsi
+    sprite: CMU14/Weapons/Guns/UPP/emblr/emblr_inhands.rsi
     layers:
       - state: base
-        sprite: _AU14/Weapons/Guns/UPP/emblr/emblr_icon.rsi
+        sprite: CMU14/Weapons/Guns/UPP/emblr/emblr_icon.rsi
         map: ["enum.GunVisualLayers.Base"]
   - type: BallisticAmmoProvider
     whitelist:
@@ -107,7 +121,7 @@
     cycleDelay: 6.0
     proto: CMURocket70mm
   - type: Clothing
-    sprite: _AU14/Weapons/Guns/UPP/emblr/emblr_inhands.rsi
+    sprite: CMU14/Weapons/Guns/UPP/emblr/emblr_inhands.rsi
   - type: Gun
     fireRate: 0.83
     soundGunshot:
@@ -115,6 +129,20 @@
   - type: Corrodible
     isCorrodible: false
   - type: RMCMagneticItem
+  # cmu edit start
+  - type: CMUBackblast
+    nearEffect: CMUBackblastSmokeNear
+    farEffect: CMUBackblastSmokeFar
+  # cmu edit end
+  - type: InteractedBlacklist
+    blacklist:
+      components:
+      - Xeno
+      - CMUPathogenWalker
+  - type: GunUserWhitelist # CMU14: demo specialist only
+    whitelist:
+      components:
+      - DemoSpecWhitelist
 
 # 84mm HE
 - type: entity
@@ -361,6 +389,7 @@
   parent: CMUProjectileRocket70mm
   categories: [ HideSpawnMenu ]
   components:
+  - type: TankCookOffProjectile # CMU14
   - type: Projectile
     impactEffect: BulletImpactEffect
     damage:
@@ -402,6 +431,7 @@
   parent: RMCProjectileRocket84mm
   categories: [ HideSpawnMenu ]
   components:
+  - type: TankCookOffProjectile # CMU14
   - type: Projectile
     impactEffect: BulletImpactEffect
     damage:

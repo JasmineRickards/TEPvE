@@ -77,6 +77,7 @@ rmc-xeno-evolution-failed-marines-dropped = The sky talls have already landed, w
 rmc-xeno-evolution-failed-queen-exists = The hive already has a Queen!
 rmc-xeno-evolution-start-self = We begin to twist and contort.
 rmc-xeno-evolution-start-others = {$xeno} begins to twist and contort.
+rmc-xeno-corruptedevolution-failed-insufficient-hours = You do not have enough playtime to evolve into a Corrupted Queen.
 
 # Insight
 rmc-xeno-insight-empower = We have gained sufficient insight in our prey to empower our next Deploy Traps!
@@ -108,6 +109,9 @@ rmc-xeno-headbutt-too-far = We can't headbutt from this distance with our crest 
 # Leap
 cm-xeno-leap-blocked = We cannot do that while squeezing and scuttling!
 cm-xeno-leap-cancelled = We cancel our leap!
+
+# CMU14
+cmu-xeno-dash-blocked = Something blocks the dash!
 
 # Plant weeds
 cm-xeno-weeds-source-already-here = There is already a resin node here!

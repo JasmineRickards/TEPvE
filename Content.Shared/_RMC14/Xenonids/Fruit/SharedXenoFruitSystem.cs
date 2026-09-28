@@ -17,6 +17,8 @@ using Content.Shared.Administration.Logs;
 using Content.Shared.Buckle.Components;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Components;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Damage.Prototypes;
 using Content.Shared.Database;
 using Content.Shared.Destructible;
@@ -51,7 +53,6 @@ namespace Content.Shared._RMC14.Xenonids.Fruit;
 public sealed partial class SharedXenoFruitSystem : EntitySystem
 {
     [Dependency] private IGameTiming _timing = default!;
-    [Dependency] private IMapManager _map = default!;
     [Dependency] private INetManager _net = default!;
     [Dependency] private IPrototypeManager _prototype = default!;
     [Dependency] private ISharedAdminLogManager _adminLogs = default!;
@@ -122,7 +123,6 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
         SubscribeLocalEvent<XenoFruitEffectHasteComponent, MeleeHitEvent>(OnXenoFruitEffectHasteHit);
         SubscribeLocalEvent<XenoFruitEffectHasteComponent, ComponentShutdown>(OnXenoFruitEffectHasteShutdown);
         // Fruit state updates
-        SubscribeLocalEvent<XenoFruitComponent, AfterAutoHandleStateEvent>(OnXenoFruitAfterState);
         SubscribeLocalEvent<XenoFruitComponent, DestructionEventArgs>(OnXenoFruitDestruction);
         SubscribeLocalEvent<XenoFruitComponent, ComponentShutdown>(OnXenoFruitShutdown);
         SubscribeLocalEvent<XenoFruitComponent, EntityTerminatingEvent>(OnXenoFruitTerminating);
@@ -339,7 +339,7 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
         }
 
         // Target not on weeds
-        target = target.SnapToGrid(EntityManager, _map);
+        target = target.SnapToGrid(EntityManager);
         if (checkWeeds && !_xenoWeeds.IsOnWeeds((gridId, grid), target))
         {
             popup = Loc.GetString("rmc-xeno-fruit-plant-failed-weeds");
@@ -414,7 +414,7 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
             return;
         }
 
-        var coordinates = _transform.GetMoverCoordinates(xeno).SnapToGrid(EntityManager, _map);
+        var coordinates = _transform.GetMoverCoordinates(xeno).SnapToGrid(EntityManager);
 
         if (!coordinates.IsValid(EntityManager))
             return;
@@ -643,7 +643,7 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
         if (!TryComp(user, out DamageableComponent? damage))
             return false;
 
-        if (!fruit.Comp.CanConsumeAtFull && damage.TotalDamage == 0)
+        if (!fruit.Comp.CanConsumeAtFull && _damageable.GetTotalDamage((user, damage)) == 0)
         {
             _popup.PopupClient(Loc.GetString("rmc-xeno-fruit-pick-failed-health-full"), user, user);
             return false;
@@ -715,7 +715,7 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
         if (!TryComp(target, out DamageableComponent? damage))
             return false;
 
-        if (!fruit.Comp.CanConsumeAtFull && damage.TotalDamage == 0)
+        if (!fruit.Comp.CanConsumeAtFull && _damageable.GetTotalDamage((target, damage)) == 0)
         {
             _popup.PopupClient(Loc.GetString("rmc-xeno-fruit-pick-failed-health-full-target"), user, user);
             return false;
@@ -894,7 +894,7 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
     private void OnXenoFruitEffectSpeedShutdown(Entity<XenoFruitEffectSpeedComponent> xeno, ref ComponentShutdown ev)
     {
         _popup.PopupClient(Loc.GetString("rmc-xeno-fruit-effect-end"), xeno.Owner, xeno.Owner, PopupType.MediumCaution);
-        _movementSpeed.RefreshMovementSpeedModifiers(xeno);
+        _movementSpeed.RefreshMovementSpeedModifiers((xeno.Owner, null));
     }
 
     private void OnXenoFruitSpeedRefresh(Entity<XenoFruitEffectSpeedComponent> xeno, ref RefreshMovementSpeedModifiersEvent args)
@@ -1048,12 +1048,6 @@ public sealed partial class SharedXenoFruitSystem : EntitySystem
     private void OnXenoFruitTerminating(Entity<XenoFruitComponent> fruit, ref EntityTerminatingEvent args)
     {
         XenoFruitRemoved(fruit);
-    }
-
-    private void OnXenoFruitAfterState(Entity<XenoFruitComponent> fruit, ref AfterAutoHandleStateEvent args)
-    {
-        var ev = new XenoFruitStateChangedEvent();
-        RaiseLocalEvent(fruit, ref ev);
     }
 
     private void SetFruitState(Entity<XenoFruitComponent> fruit, XenoFruitState state)

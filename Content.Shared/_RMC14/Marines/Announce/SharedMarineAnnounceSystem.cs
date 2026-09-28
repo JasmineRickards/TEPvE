@@ -52,6 +52,13 @@ public abstract partial class SharedMarineAnnounceSystem : EntitySystem
 
     private static readonly EntProtoId<ARESLogTypeComponent> LogCat = "ARESTabAnnouncementLogs";
 
+    // CMU14: Vehicle interiors inherit their supplying faction.
+    public void SetComputerFaction(Entity<MarineCommunicationsComputerComponent> computer, string faction)
+    {
+        computer.Comp.Faction = faction;
+        Dirty(computer);
+    }
+
     public override void Initialize()
     {
         SubscribeLocalEvent<MarineCommunicationsComputerComponent, EchoSquadReasonEvent>(OnEchoSquadReason);
@@ -184,16 +191,18 @@ public abstract partial class SharedMarineAnnounceSystem : EntitySystem
         string message,
         SoundSpecifier? sound = null,
         LocId? announcement = null,
-        string? faction = null)
+        string? faction = null,
+        string? ship = null) // CMU14: header name for the ares-map announcement
     {
     }
 
     public void AnnounceARES(
         EntityUid? source,
         string message,
-        SoundSpecifier? sound = null)
+        SoundSpecifier? sound = null,
+        string? faction = null) // CMU14: optional GOVFOR/OPFOR recipient filter.
     {
-        AnnounceARESStaging(source, message, sound, "rmc-announcement-ares-command");
+        AnnounceARESStaging(source, message, sound, "rmc-announcement-ares-command", faction); // CMU14
     }
 
     public virtual void AnnounceSquad(
@@ -354,10 +363,10 @@ public abstract partial class SharedMarineAnnounceSystem : EntitySystem
         return Loc.GetString("rmc-announcement-message", ("author", author), ("message", message));
     }
 
-    public string FormatARESStaging(LocId? author, string message)
+    public string FormatARESStaging(LocId? author, string message, string? ship = null) // CMU14: ship header name
     {
         author ??= "rmc-announcement-ares-message";
-        return Loc.GetString(author, ("message", FormattedMessage.EscapeText(message)));
+        return Loc.GetString(author, ("message", FormattedMessage.EscapeText(message)), ("ship", ship ?? string.Empty));
     }
 
     public string FormatARES(string message)

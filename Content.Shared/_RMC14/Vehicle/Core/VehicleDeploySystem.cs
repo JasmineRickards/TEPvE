@@ -8,6 +8,7 @@ using Content.Shared.Chat;
 using Content.Shared.Interaction;
 using Content.Shared.Mobs.Components;
 using Content.Shared.Popups;
+using Content.Shared.Vehicle;
 using Content.Shared.Vehicle.Components;
 using Content.Shared.Weapons.Ranged.Components;
 using Content.Shared.Weapons.Ranged.Events;
@@ -302,6 +303,14 @@ public sealed partial class VehicleDeploySystem : EntitySystem
 
         if (args.Cancelled)
             return;
+
+        if (TryGetVehicleFromContained(ent.Owner, out var maintenanceVehicle) &&
+            TryComp<VehicleMaintenanceComponent>(maintenanceVehicle, out var maintenance) && maintenance.ControlsLocked)
+        {
+            args.Cancelled = true;
+            args.ResetCooldown = true;
+            return;
+        }
 
         if (!string.Equals(ent.Comp.HardpointType, "Cannon", StringComparison.OrdinalIgnoreCase))
             return;

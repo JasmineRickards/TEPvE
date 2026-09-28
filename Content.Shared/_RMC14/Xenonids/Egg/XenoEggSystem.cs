@@ -14,11 +14,13 @@ using Content.Shared.Actions;
 using Content.Shared.Buckle.Components;
 using Content.Shared.Coordinates;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Database;
 using Content.Shared.Destructible;
 using Content.Shared.DoAfter;
 using Content.Shared.FixedPoint;
 using Content.Shared.Ghost;
+using Content.Shared.Ghost.Components;
 using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Interaction;
@@ -129,7 +131,7 @@ public sealed partial class XenoEggSystem : EntitySystem
     private void OnDropshipHijackStart(ref DropshipHijackStartEvent ev)
     {
         // Ovipositor cooldown reset is xeno-specific; skip for human-vs-human hijacks
-        if (ev.IsHumanHijack)
+        if (ev.HijackerType == DropshipHijackerType.Human) // CMU14
             return;
 
         var query = EntityQueryEnumerator<XenoOvipositorCapableComponent>();

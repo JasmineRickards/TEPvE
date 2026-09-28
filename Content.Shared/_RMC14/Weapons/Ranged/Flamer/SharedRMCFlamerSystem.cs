@@ -1,5 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
-using Content.Shared._CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
 using Content.Shared._RMC14.Atmos;
 using Content.Shared._RMC14.Attachable.Components;
 using Content.Shared._RMC14.Chemistry.Reagent;
@@ -331,6 +331,7 @@ public abstract partial class SharedRMCFlamerSystem : EntitySystem
         var chainComp = EnsureComp<RMCFlamerChainComponent>(chain);
         chainComp.Spawn = reagent.FireEntity;
         chainComp.Tiles = tiles;
+        chainComp.Origin = fromCoordinates; // CMU14
         chainComp.Reagent = reagent.ID;
         chainComp.MaxIntensity = tank.Value.Comp.MaxIntensity;
         chainComp.MaxDuration = tank.Value.Comp.MaxDuration;
@@ -617,15 +618,24 @@ public abstract partial class SharedRMCFlamerSystem : EntitySystem
                 continue;
             }
 
-            for (var i = comp.Tiles.Count - 1; i >= 0; i--)
+            for (var i = 0; i < comp.Tiles.Count; i++)
             {
                 var tile = comp.Tiles[i];
                 if (time < tile.At)
                     continue;
 
                 comp.Tiles.RemoveAt(i);
-                if (!_zLevels.TryProjectToGround(_transform.ToCoordinates(tile.Coordinates), out var fireCoordinates))
+                if (!_line.CanReachTile(comp.Origin, _transform.ToCoordinates(tile.Coordinates), hitBlocker: true)) // CMU14
+                {
+                    i--;
                     continue;
+                }
+
+                if (!_zLevels.TryProjectToGround(_transform.ToCoordinates(tile.Coordinates), out var fireCoordinates))
+                {
+                    i--;
+                    continue;
+                }
 
                 var fire = Spawn(comp.Spawn, fireCoordinates);
 

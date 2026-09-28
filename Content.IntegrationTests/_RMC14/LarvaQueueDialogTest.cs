@@ -13,7 +13,8 @@ using Content.Shared._RMC14.Xenonids.Hive;
 using Content.Shared._RMC14.Xenonids.JoinXeno;
 using Content.Shared._RMC14.Xenonids.Parasite;
 using Content.Shared.DoAfter;
-using Content.Shared.Ghost;
+using Content.Shared.Ghost.Components;
+using Content.Shared.Ghost.Systems;
 using Content.Shared.Mind;
 using Content.Shared.Mind.Components;
 using Robust.Shared.GameObjects;
@@ -621,7 +622,7 @@ public sealed class LarvaQueueJoinXenoUiTest
     }
 
     [Test]
-    public async Task LarvaQueueDoesNotOfferParasiteClaimedLarva()
+    public async Task ParasiteClaimedLarvaIsClaimedByInfector() // CMU14: retry claims it, queue must not offer it
     {
         await using var pair = await PoolManager.GetServerClient(new PoolSettings
         {
@@ -640,6 +641,7 @@ public sealed class LarvaQueueJoinXenoUiTest
 
         EntityUid ghost = default;
         EntityUid hive = default;
+        EntityUid victim = default; // CMU14
         EntityUid larva = default;
         await server.WaitAssertion(() =>
         {
@@ -664,7 +666,7 @@ public sealed class LarvaQueueJoinXenoUiTest
 
         await server.WaitAssertion(() =>
         {
-            var victim = entMan.SpawnEntity("CMMobHuman", map.GridCoords.Offset(new Vector2(2, 0)));
+            victim = entMan.SpawnEntity("CMMobHuman", map.GridCoords.Offset(new Vector2(2, 0)));
             var infected = entMan.EnsureComponent<VictimInfectedComponent>(victim);
 #pragma warning disable RA0002
             infected.InfectorUser = player.UserId;
@@ -686,14 +688,10 @@ public sealed class LarvaQueueJoinXenoUiTest
 
         await server.WaitAssertion(() =>
         {
-            Assert.That(player.AttachedEntity, Is.EqualTo(ghost));
+            // CMU14: claim retry hands the larva to the eligible infector without a queue offer
+            Assert.That(player.AttachedEntity, Is.EqualTo(larva));
             Assert.That(entMan.HasComponent<DialogComponent>(ghost), Is.False);
-
-            OpenJoinXenoUi(entMan, ghost);
-            var state = GetJoinXenoState(entMan, ghost);
-            var entry = state.Entries.Single(e => e.Hive == entMan.GetNetEntity(hive));
-            Assert.That(entry.Status, Is.EqualTo(JoinXenoQueueStatus.Queued));
-            Assert.That(entry.Position, Is.EqualTo(1));
+            Assert.That(entMan.GetComponent<VictimInfectedComponent>(victim).InfectorUser, Is.Null);
         });
 
         await pair.CleanReturnAsync();
@@ -1037,7 +1035,7 @@ public sealed class LarvaQueueJoinXenoUiTest
         {
             ghost = entMan.SpawnEntity(GameTicker.ObserverPrototypeName, map.GridCoords);
             var ghostComp = entMan.GetComponent<GhostComponent>(ghost);
-            ghostSystem.SetTimeOfDeath((ghost, ghostComp), timing.CurTime - TimeSpan.FromMinutes(3));
+            ghostSystem.SetTimeOfDeath((ghost, ghostComp), timing.RealTime - TimeSpan.FromMinutes(3));
 
             Assert.That(entMan.HasComponent<GhostComponent>(ghost), Is.True);
             Assert.That(parasiteRoles.UserCheck(ghost), Is.True);

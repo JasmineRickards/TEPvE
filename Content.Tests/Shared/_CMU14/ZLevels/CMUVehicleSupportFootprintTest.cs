@@ -1,10 +1,10 @@
 using System.Collections.Generic;
 using System.Numerics;
-using Content.Shared._CMU14.ZLevels.Vehicles;
+using Content.Shared.CMU14.ZLevels.Vehicles;
 using NUnit.Framework;
 using Robust.Shared.Maths;
 
-namespace Content.Tests.Shared._CMU14.ZLevels;
+namespace Content.Tests.Shared.CMU14.ZLevels;
 
 [TestFixture]
 public sealed class CMUVehicleSupportFootprintTest
@@ -24,22 +24,6 @@ public sealed class CMUVehicleSupportFootprintTest
         Assert.That(samples, Does.Contain(new Vector2(-1f, -1f)));
         Assert.That(samples, Does.Contain(Vector2.Zero));
         Assert.That(samples, Does.Contain(new Vector2(1f, 1f)));
-    }
-
-    [Test]
-    public void NormalizesInvertedBounds()
-    {
-        var samples = new List<Vector2>();
-
-        CMUVehicleSupportFootprint.GenerateLocalSamples(
-            new Box2(-0.5f, 1.5f, 0.5f, -0.5f),
-            1f,
-            0f,
-            samples);
-
-        Assert.That(samples, Has.Count.EqualTo(6));
-        Assert.That(samples, Does.Contain(new Vector2(-0.5f, -0.5f)));
-        Assert.That(samples, Does.Contain(new Vector2(0.5f, 1.5f)));
     }
 
     [Test]

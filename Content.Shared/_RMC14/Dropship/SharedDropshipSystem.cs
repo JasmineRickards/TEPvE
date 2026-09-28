@@ -1,6 +1,9 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
-using Content.Shared._CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.Marines; // CMU14
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.Dropship.MultiDeck; // CMU14
+using Content.Shared.CMU14.Xenomorphs.Pathogen;
 using Content.Shared._RMC14.ARES;
 using Content.Shared._RMC14.ARES.Logs;
 using Content.Shared._RMC14.Areas;
@@ -21,8 +24,8 @@ using Content.Shared._RMC14.Xenonids.Maturing;
 using Content.Shared.Access.Components;
 using Content.Shared.Access.Systems;
 using Content.Shared.Administration.Logs;
-using Content.Shared.AU14;
-using Content.Shared.AU14.Round;
+using Content.Shared.CMU14;
+using Content.Shared.CMU14.Round;
 using Content.Shared.Database;
 using Content.Shared.DoAfter;
 using Content.Shared.Examine;
@@ -39,7 +42,10 @@ using Robust.Shared.Configuration;
 using Robust.Shared.Containers;
 using Robust.Shared.Map;
 using Robust.Shared.Network;
+using Robust.Shared.Player;
 using Robust.Shared.Prototypes;
+// CMU14: Force on Force roles, hijacking, announcements and identification.
+using Robust.Shared.Random;
 using Robust.Shared.Timing;
 
 namespace Content.Shared._RMC14.Dropship;
@@ -49,6 +55,7 @@ public abstract partial class SharedDropshipSystem : EntitySystem
     [Dependency] protected SharedAudioSystem Audio = default!;
 
     [Dependency] private AreaSystem _areas = default!;
+    [Dependency] private AccessReaderSystem _navigationAccess = default!;
     [Dependency] private ISharedAdminLogManager _adminLog = default!;
     [Dependency] private IConfigurationManager _config = default!;
     [Dependency] private SharedContainerSystem _container = default!;
@@ -64,6 +71,8 @@ public abstract partial class SharedDropshipSystem : EntitySystem
     [Dependency] private SharedDoAfterSystem _doAfter = default!;
     [Dependency] private SharedXenoAnnounceSystem _xenoAnnounce = default!;
     [Dependency] private CMUSharedZLevelsSystem _zLevels = default!;
+    // CMU14: Force on Force roles, hijacking, announcements and identification.
+    [Dependency] private IRobustRandom _hijackRandom = default!;
 
     private TimeSpan _dropshipInitialDelay;
     private TimeSpan _hijackInitialDelay;
@@ -76,15 +85,17 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         SubscribeLocalEvent<DropshipComponent, MapInitEvent>(OnDropshipMapInit);
 
         SubscribeLocalEvent<DropshipNavigationComputerComponent, MapInitEvent>(OnMapInit);
-        
+
         //fix queenxeno ignore AccessReaderComponent
         SubscribeLocalEvent<DropshipNavigationComputerComponent, ActivateInWorldEvent>(OnNavigationActivateInWorld, before: [typeof(ActivatableUISystem), typeof(ActivatableUIRequiresAccessSystem)]);
         //
-        
+
         SubscribeLocalEvent<DropshipNavigationComputerComponent, ActivatableUIOpenAttemptEvent>(OnUIOpenAttempt);
         SubscribeLocalEvent<DropshipNavigationComputerComponent, AfterActivatableUIOpenEvent>(OnNavigationOpen);
         SubscribeLocalEvent<DropshipNavigationComputerComponent, DropshipLockoutOverrideDoAfterEvent>(OnNavigationLockoutOverride);
         SubscribeLocalEvent<DropshipNavigationComputerComponent, DropshipHumanHijackDoAfterEvent>(OnHumanHijackDoAfter);
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        InitializeForceOnForceHijack();
         SubscribeLocalEvent<DropshipNavigationComputerComponent, GettingAttackedAttemptEvent>(OnGettingAttackedAttempt);
 
         SubscribeLocalEvent<DropshipTerminalComponent, ActivateInWorldEvent>(OnDropshipTerminalActivateInWorld, before: [typeof(ActivatableUISystem), typeof(ActivatableUIRequiresAccessSystem)]);
@@ -118,7 +129,8 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         Subs.BuiEvents<DropshipNavigationComputerComponent>(DropshipHijackerUiKey.Key,
             subs =>
             {
-                subs.Event<DropshipHijackerDestinationChosenBuiMsg>(OnHijackerDestinationChosenMsg);
+                // CMU14: Force on Force roles, hijacking, announcements and identification.
+                subs.Event<DropshipHijackerInitiateBuiMsg>(OnHijackerInitiateMsg);
                 subs.Event<DropshipHijackerDeclineBuiMsg>(OnHijackerDeclineMsg);
             });
 
@@ -134,18 +146,21 @@ public abstract partial class SharedDropshipSystem : EntitySystem
 
     private void OnDropshipMapInit(Entity<DropshipComponent> ent, ref MapInitEvent args)
     {
-        var children = Transform(ent).ChildEnumerator;
-        while (children.MoveNext(out var uid))
+        if (!_net.IsClient)
         {
-            if (TerminatingOrDeleted(uid))
-                continue;
-
-            if (HasComp<DropshipWeaponPointComponent>(uid) ||
-                HasComp<DropshipEnginePointComponent>(uid) ||
-                HasComp<DropshipUtilityPointComponent>(uid) ||
-                HasComp<DropshipElectronicSystemPointComponent>(uid))
+            var children = Transform(ent).ChildEnumerator;
+            while (children.MoveNext(out var uid))
             {
-                ent.Comp.AttachmentPoints.Add(uid);
+                if (TerminatingOrDeleted(uid))
+                    continue;
+
+                if (HasComp<DropshipWeaponPointComponent>(uid) ||
+                    HasComp<DropshipEnginePointComponent>(uid) ||
+                    HasComp<DropshipUtilityPointComponent>(uid) ||
+                    HasComp<DropshipElectronicSystemPointComponent>(uid))
+                {
+                    ent.Comp.AttachmentPoints.Add(uid);
+                }
             }
         }
 
@@ -180,6 +195,21 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         var xform = Transform(ent);
         if (TryComp(xform.ParentUid, out DropshipComponent? dropship) &&
             dropship.Crashed)
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        {
+            args.Cancel();
+            return;
+        }
+
+        if (IsForceOnForceHijacker(ent, args.User))
+        {
+            args.Cancel();
+            StartForceOnForceHijack(ent, args.User);
+            return;
+        }
+
+        // A legacy/admin-added hijacker component must not expose both carriers to a FoF human.
+        if (isHijacker && IsForceOnForceHuman(args.User))
         {
             args.Cancel();
             return;
@@ -192,6 +222,13 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         {
             args.Cancel();
             _popup.PopupClient(Loc.GetString("rmc-dropship-hijack-thirdparty"), ent, args.User, PopupType.MediumCaution);
+            return;
+        }
+
+        if (!isHijacker && !CanUseNavigation(ent, args.User))
+        {
+            args.Cancel();
+            _popup.PopupClient(Loc.GetString("cmu-dropship-navigation-access-denied"), ent, args.User);
             return;
         }
 
@@ -271,44 +308,63 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         // Xeno hijacker: open destination menu immediately
         OpenHijackDestinationMenu(ent, args.User);
     }
-    
+
     // Fix to queenxeno ignore AccessReaderComponent
     private void OnNavigationActivateInWorld(Entity<DropshipNavigationComputerComponent> ent,
         ref ActivateInWorldEvent args)
     {
         var user = args.User;
         var isXeno = HasComp<XenoComponent>(user);
-        var isHijacker = HasComp<DropshipHijackerComponent>(user);
-        
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        var isHijacker = HasComp<DropshipHijackerComponent>(user) || IsForceOnForceHijacker(ent, user);
+
         //for non xeno pass normal AccessReader and skill checks still apply.
         if (!isXeno && !isHijacker)
         {
             return;
         }
-        
+
         args.Handled = true;
         if (_net.IsClient)
         {
             return;
         }
 
-        var ev = new ActivatableUIOpenAttemptEvent(user);
-        
+        var ev = new ActivatableUIOpenAttemptEvent(user, false);
+
         OnUIOpenAttempt(ent, ref ev);
     }
 
     /// <summary>
-    ///     Opens the hijack destination selection UI for a user.
-    ///     For xeno hijackers: shows DropshipHijackDestination entities on the hijackee's ship only.
-    ///     For human hijackers: shows enemy primary LZs only.
+    // CMU14: Force on Force roles, hijacking, announcements and identification.
+    ///     Offers one action; destination identities and the random selection stay server-side.
     /// </summary>
     private void OpenHijackDestinationMenu(EntityUid computer, EntityUid user)
     {
-        var destinations = new List<(NetEntity Id, string Name)>();
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        var destinations = GetHijackDestinations(user);
+        _ui.OpenUi(computer, DropshipHijackerUiKey.Key, user);
+        _ui.SetUiState(computer, DropshipHijackerUiKey.Key,
+            new DropshipHijackerBuiState(destinations.Count > 0, IsQueenHijacker(user)));
+    }
+
+    private List<EntityUid> GetHijackDestinations(EntityUid user)
+    {
+        var destinations = new List<EntityUid>();
 
         var isHumanHijacker = TryComp<DropshipHijackerComponent>(user, out var hijacker) && hijacker.IsHumanHijacker;
 
-        if (isHumanHijacker)
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        if (IsForceOnForceHuman(user))
+        {
+            var query = EntityQueryEnumerator<DropshipHijackDestinationComponent>();
+            while (query.MoveNext(out var uid, out _))
+            {
+                if (IsOpposingCarrierDestination(user, uid))
+                    destinations.Add(uid);
+            }
+        }
+        else if (isHumanHijacker)
         {
             // Resolve the hijacker's own faction
             string? userFaction = null;
@@ -329,13 +385,8 @@ public abstract partial class SharedDropshipSystem : EntitySystem
                 if (lzFaction == null && userFaction == null)
                     continue;
 
-                destinations.Add((GetNetEntity(uid), Name(uid)));
-            }
-
-            if (destinations.Count == 0)
-            {
-                _popup.PopupEntity(Loc.GetString("rmc-dropship-hijack-no-enemy-lz"), computer, user, PopupType.LargeCaution);
-                return;
+                // CMU14: Force on Force roles, hijacking, announcements and identification.
+                destinations.Add(uid);
             }
         }
         else
@@ -346,26 +397,25 @@ public abstract partial class SharedDropshipSystem : EntitySystem
             while (query.MoveNext(out var uid, out _, out var xform))
             {
                 if (xform.MapUid is { } mapUid && shipMaps.Contains(mapUid))
-                    destinations.Add((GetNetEntity(uid), Name(uid)));
+                    // CMU14: Force on Force roles, hijacking, announcements and identification.
+                    destinations.Add(uid);
             }
         }
 
-        _ui.OpenUi(computer, DropshipHijackerUiKey.Key, user);
-        _ui.SetUiState(computer,
-            DropshipHijackerUiKey.Key,
-            new DropshipHijackerBuiState(destinations, IsQueenHijacker(user)));
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        return destinations;
     }
 
     /// <summary>
     ///     Gets the map UIDs of ALL ships in the game.
     ///     Used to filter xeno/threat hijack destinations to any ship.
-    ///     Includes AlmayerComponent maps (default marine) and all ShipFactionComponent maps.
+    ///     Includes WarshipComponent maps (default marine) and all ShipFactionComponent maps.
     /// </summary>
-    private HashSet<EntityUid> GetAllShipMaps()
+    private HashSet<EntityUid> GetAllShipMaps() // CMU14 Method
     {
         var shipMaps = new HashSet<EntityUid>();
 
-        var almayerQuery = EntityQueryEnumerator<AlmayerComponent, TransformComponent>();
+        var almayerQuery = EntityQueryEnumerator<WarshipComponent, TransformComponent>();
         while (almayerQuery.MoveNext(out _, out _, out var xform))
         {
             AddShipMapAndConnectedZLevels(shipMaps, xform.MapUid);
@@ -385,34 +435,7 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         if (mapUid is not { } map)
             return;
 
-        if (_zLevels.TryGetZNetwork(map, out var network) &&
-            _zLevels.TryGetDepthBounds(network.Value, out var minDepth, out var maxDepth))
-        {
-            var connectedMaps = new List<EntityUid>();
-            for (var depth = minDepth; depth <= maxDepth; depth++)
-            {
-                if (_zLevels.TryGetMapAtDepth(network.Value, depth, out var connectedMap))
-                    connectedMaps.Add(connectedMap);
-            }
-
-            AddShipMapAndConnectedZLevels(shipMaps, map, connectedMaps);
-            return;
-        }
-
-        AddShipMapAndConnectedZLevels(shipMaps, map, null);
-    }
-
-    private static void AddShipMapAndConnectedZLevels(
-        HashSet<EntityUid> shipMaps,
-        EntityUid mapUid,
-        IEnumerable<EntityUid>? connectedMaps)
-    {
-        shipMaps.Add(mapUid);
-
-        if (connectedMaps == null)
-            return;
-
-        foreach (var connectedMap in connectedMaps)
+        foreach (var connectedMap in _zLevels.GetAllNetworkMaps(map)) // CMU14
             shipMaps.Add(connectedMap);
     }
 
@@ -625,7 +648,7 @@ public abstract partial class SharedDropshipSystem : EntitySystem
 
     private void OnTerminalOpen(Entity<DropshipTerminalComponent> terminal, ref AfterActivatableUIOpenEvent args)
     {
-        if (!_ui.IsUiOpen(terminal.Owner, DropshipTerminalUiKey.Key, args.Actor))
+        if (!_ui.IsUiOpen(terminal.Owner, DropshipTerminalUiKey.Key, args.User))
             return;
 
         var closestLZ = FindClosestLZ(terminal);
@@ -716,6 +739,29 @@ public abstract partial class SharedDropshipSystem : EntitySystem
             return;
         }
 
+        // CMU14 Begin: recall guards
+        if (terminal.Comp.LastSummonAt is { } lastSummon && _timing.CurTime - lastSummon < terminal.Comp.SummonCooldown)
+        {
+            _popup.PopupEntity("This terminal is still recharging.", terminal, args.Actor, PopupType.MediumCaution);
+            return;
+        }
+
+        // Only abandoned ships can be pulled remotely: anyone aboard, be it crew, boarders
+        // or hijackers, keeps the ship where it is.
+        if (Transform(computerId.Value).GridUid is { } shipGrid)
+        {
+            var actors = EntityQueryEnumerator<ActorComponent, TransformComponent>();
+            while (actors.MoveNext(out _, out _, out var actorXform))
+            {
+                if (actorXform.GridUid != shipGrid)
+                    continue;
+
+                _popup.PopupEntity("There is still someone aboard that dropship!", terminal, args.Actor, PopupType.MediumCaution);
+                return;
+            }
+        }
+        // CMU14 End
+
         if (!TryDropshipLaunchPopup(terminal, args.Actor, false))
             return;
 
@@ -727,6 +773,7 @@ public abstract partial class SharedDropshipSystem : EntitySystem
 
         _ui.CloseUi(terminal.Owner, DropshipTerminalUiKey.Key, args.Actor);
         _popup.PopupEntity("This dropship is now on its way.", terminal, args.Actor, PopupType.Medium);
+        terminal.Comp.LastSummonAt = _timing.CurTime; // CMU14
     }
 
     private void OnAttachmentPointMapInit<TComp, TEvent>(Entity<TComp> ent, ref TEvent args) where TComp : IComponent?
@@ -743,6 +790,13 @@ public abstract partial class SharedDropshipSystem : EntitySystem
 
     private void OnAttachmentPointRemove<TComp, TEvent>(Entity<TComp> ent, ref TEvent args) where TComp : IComponent?
     {
+        // AttachmentPoints is server-authoritative replicated state. Attachment
+        // points can terminate client-side while a dropship changes maps/PVS;
+        // mutating the set there dirties the networked dropship during
+        // prediction rollback and can trip ResetPredictedEntities.
+        if (_net.IsClient)
+            return;
+
         if (TryGetGridDropship(ent, out var dropship))
         {
             dropship.Comp.AttachmentPoints.Remove(ent);
@@ -807,7 +861,8 @@ public abstract partial class SharedDropshipSystem : EntitySystem
             return;
         }
 
-        FlyTo(ent, destination.Value, user);
+        if (!FlyTo(ent, destination.Value, user))
+            return;
 
         var grid = _transform.GetGrid((ent.Owner, Transform(ent.Owner)));
         if (grid != null)
@@ -817,6 +872,9 @@ public abstract partial class SharedDropshipSystem : EntitySystem
     private void OnDropshipNavigationCancelMsg(Entity<DropshipNavigationComputerComponent> ent,
         ref DropshipNavigationCancelMsg args)
     {
+        if (!CanUseNavigation(ent, args.Actor))
+            return;
+
         var grid = _transform.GetGrid((ent.Owner, Transform(ent.Owner)));
         if (!TryComp(grid, out FTLComponent? ftl) || !TryComp(grid, out DropshipComponent? dropship))
             return;
@@ -833,21 +891,35 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         RefreshUI();
     }
 
-    private void OnHijackerDestinationChosenMsg(Entity<DropshipNavigationComputerComponent> ent,
-        ref DropshipHijackerDestinationChosenBuiMsg args)
+    // CMU14: Force on Force roles, hijacking, announcements and identification.
+    private void OnHijackerInitiateMsg(Entity<DropshipNavigationComputerComponent> ent,
+        ref DropshipHijackerInitiateBuiMsg args)
     {
         if (_net.IsClient)
             return;
 
         _ui.CloseUi(ent.Owner, DropshipHijackerUiKey.Key, args.Actor);
 
-        if (!TryGetEntity(args.Destination, out var destination))
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        var destinations = GetHijackDestinations(args.Actor);
+        if (destinations.Count == 0)
         {
-            Log.Warning($"{ToPrettyString(args.Actor)} tried to hijack to invalid destination");
+            // CMU14: Force on Force roles, hijacking, announcements and identification.
+            _popup.PopupEntity(Loc.GetString("cmu-dropship-hijack-no-destinations"), ent, args.Actor);
             return;
         }
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        EntityUid? destination = _hijackRandom.Pick(destinations);
 
         var isHumanHijacker = TryComp<DropshipHijackerComponent>(args.Actor, out var hijackerComp) && hijackerComp.IsHumanHijacker;
+
+// CMU14: Force on Force roles, hijacking, announcements and identification.
+
+        if (TryHandleForceOnForceHijack(ent, args.Actor, destination.Value))
+            return;
+
+        if (hijackerComp == null || !TryDropshipHijackPopup(ent, args.Actor, false))
+            return;
 
         if (isHumanHijacker)
         {
@@ -885,7 +957,7 @@ public abstract partial class SharedDropshipSystem : EntitySystem
                 if (TryComp<MarineComponent>(args.Actor, out var marine) && !string.IsNullOrEmpty(marine.Faction))
                     hijackerFaction = marine.Faction.ToLowerInvariant();
 
-                var ev = new DropshipHijackStartEvent(xform.ParentUid, hijackerFaction, true);
+                var ev = new DropshipHijackStartEvent(xform.ParentUid, hijackerFaction, DropshipHijackerType.Human); // CMU14
                 RaiseLocalEvent(ref ev);
             }
         }
@@ -918,7 +990,10 @@ public abstract partial class SharedDropshipSystem : EntitySystem
                 dropship.Crashed = true;
                 Dirty(xform.ParentUid, dropship);
 
-                var ev = new DropshipHijackStartEvent(xform.ParentUid);
+                var hijackerType = HasComp<CMUPathogenHiveMemberComponent>(args.Actor) ? DropshipHijackerType.Pathogen :
+                    HasComp<XenoComponent>(args.Actor) ? DropshipHijackerType.Xeno :
+                    DropshipHijackerType.Other; // CMU14
+                var ev = new DropshipHijackStartEvent(xform.ParentUid, HijackerType: hijackerType); // CMU14
                 RaiseLocalEvent(ref ev);
             }
         }
@@ -1109,7 +1184,8 @@ public abstract partial class SharedDropshipSystem : EntitySystem
     protected bool TryDropshipHijackPopup(EntityUid computer, Entity<DropshipHijackerComponent?> user, bool predicted)
     {
         var roundDuration = _gameTicker.RoundDuration();
-        if (HasComp<DropshipHijackerComponent>(user) && roundDuration < _hijackInitialDelay)
+        // CMU14: Force on Force roles, hijacking, announcements and identification.
+        if ((HasComp<DropshipHijackerComponent>(user) || IsForceOnForceHijacker(computer, user)) && roundDuration < _hijackInitialDelay)
         {
             var minutesLeft = Math.Max(1, (int)(_hijackInitialDelay - roundDuration).TotalMinutes);
             var msg = Loc.GetString("rmc-dropship-pre-hijack", ("minutes", minutesLeft));
@@ -1124,9 +1200,30 @@ public abstract partial class SharedDropshipSystem : EntitySystem
 
         var map = _transform.GetMap(user.Owner);
 
-        // Prevent double hijack.
-        if (TryComp(map, out EvacuationProgressComponent? evacuation) &&
-            evacuation.DropShipCrashed)
+        // Resolve the colony below a multi-deck cabin before checking hijack eligibility.
+        if (map is { } cabinMap && TryGetGridDropship(computer, out var ship) &&
+            TryComp<MultiDeckDropshipComponent>(ship, out var decks) &&
+            _zLevels.TryMapOffset(cabinMap, -decks.LandingOffset, out var groundMap))
+            map = groundMap;
+
+        // CMU14: Prevent double hijack. The progress component sits on the deck the first
+        // crash landed on, which need not be this hijacker's deck, so scan the ship z-network.
+        // No map means no network to scan.
+        var crashLanded = false;
+        if (map is { } hijackMap) // CMU14
+        {
+            foreach (var connectedMap in _zLevels.GetAllNetworkMaps(hijackMap))
+            {
+                if (TryComp(connectedMap, out EvacuationProgressComponent? evacuation) &&
+                    evacuation.DropShipCrashed)
+                {
+                    crashLanded = true;
+                    break;
+                }
+            }
+        }
+
+        if (crashLanded)
         {
             var msg = Loc.GetString("rmc-dropship-invalid-hijack");
 
@@ -1228,8 +1325,11 @@ public abstract partial class SharedDropshipSystem : EntitySystem
             yield break;
 
         var landingZoneQuery = EntityQueryEnumerator<DropshipDestinationComponent, MetaDataComponent, TransformComponent>();
-        while (landingZoneQuery.MoveNext(out var uid, out _, out var metaData, out var xform))
+        while (landingZoneQuery.MoveNext(out var uid, out var destination, out var metaData, out var xform))
         {
+            if (!destination.CanBePrimary)
+                continue;
+
             if (!HasComp<RMCPlanetComponent>(xform.ParentUid) &&
                 !HasComp<RMCPlanetComponent>(xform.MapUid))
             {
@@ -1240,19 +1340,53 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         }
     }
 
+    // CMU14 method: resolve secondary decks through their cabin controller.
     public bool TryGetGridDropship(EntityUid ent, out Entity<DropshipComponent> dropship)
     {
         if (TryComp(ent, out TransformComponent? xform) &&
             xform.GridUid is { } grid &&
-            !TerminatingOrDeleted(grid) &&
-            TryComp(xform.GridUid, out DropshipComponent? dropshipComp))
+            !TerminatingOrDeleted(grid))
         {
-            dropship = (grid, dropshipComp);
-            return true;
+            if (TryComp<DropshipDeckComponent>(grid, out var deck))
+                grid = deck.Ship;
+            if (!TerminatingOrDeleted(grid) && TryComp<DropshipComponent>(grid, out var dropshipComp))
+            {
+                dropship = (grid, dropshipComp);
+                return true;
+            }
         }
 
         dropship = default;
         return false;
+    }
+
+    // CMU14 method
+    /// <summary>Registers equipment loaded before a secondary deck was linked to its ship.</summary>
+    public void RegisterDeckAttachmentPoints(EntityUid ship, EntityUid grid)
+    {
+        if (_net.IsClient || !TryComp<DropshipComponent>(ship, out var dropship))
+            return;
+
+        var children = Transform(grid).ChildEnumerator;
+        while (children.MoveNext(out var uid))
+        {
+            if (HasComp<DropshipWeaponPointComponent>(uid) || HasComp<DropshipEnginePointComponent>(uid) ||
+                HasComp<DropshipUtilityPointComponent>(uid) || HasComp<DropshipElectronicSystemPointComponent>(uid))
+                dropship.AttachmentPoints.Add(uid);
+        }
+        Dirty(ship, dropship);
+    }
+
+    // CMU14 method
+    /// <summary>Unregisters the equipment of a deck removed from a dropship.</summary>
+    public void RemoveDeckAttachmentPoints(EntityUid ship, EntityUid grid)
+    {
+        if (_net.IsClient || !TryComp<DropshipComponent>(ship, out var dropship))
+            return;
+
+        if (dropship.AttachmentPoints.RemoveWhere(point =>
+                TerminatingOrDeleted(point) || Transform(point).GridUid == grid) > 0)
+            Dirty(ship, dropship);
     }
 
     public bool TryGetGridFaction(EntityUid ent, [NotNullWhen(true)] out string? faction)
@@ -1260,6 +1394,9 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         faction = null;
         if (!TryComp(ent, out TransformComponent? xform) || xform.GridUid is not { } grid)
             return false;
+
+        if (TryComp<DropshipDeckComponent>(grid, out var deck)) // CMU14: followers share the cabin's faction.
+            grid = deck.Ship;
 
         if (TryComp<ShipFactionComponent>(grid, out var shipFaction) &&
             !string.IsNullOrWhiteSpace(shipFaction.Faction))
@@ -1325,15 +1462,17 @@ public abstract partial class SharedDropshipSystem : EntitySystem
         return dropship.Comp.State == FTLState.Travelling || dropship.Comp.State == FTLState.Arriving;
     }
 
+    // CMU14 method: include occupants on secondary decks.
     public bool IsOnDropship(EntityUid entity)
     {
-        var grid = _transform.GetGrid(entity);
-        return HasComp<DropshipComponent>(grid);
+        return TryGetGridDropship(entity, out _);
     }
 
     public bool IsOnDropship(EntityCoordinates coordinates)
     {
         var grid = _transform.GetGrid(coordinates);
+        if (TryComp<DropshipDeckComponent>(grid, out var deck)) // CMU14: resolve secondary decks.
+            grid = deck.Ship;
         return HasComp<DropshipComponent>(grid);
     }
 
@@ -1420,5 +1559,11 @@ public abstract partial class SharedDropshipSystem : EntitySystem
             comp.Destination = destination;
             Dirty(uid, comp);
         }
+    }
+
+    public void SetDropshipCrashed(Entity<DropshipComponent> dropship, bool crashed)
+    {
+        dropship.Comp.Crashed = crashed;
+        Dirty(dropship);
     }
 }

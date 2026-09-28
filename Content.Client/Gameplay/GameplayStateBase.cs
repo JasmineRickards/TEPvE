@@ -3,6 +3,7 @@ using System.Numerics;
 using Content.Client.Clickable;
 using Content.Client.UserInterface;
 using Content.Client.Viewport;
+using Content.Shared.CCVar;
 using Content.Shared.Input;
 using Robust.Client.ComponentTrees;
 using Robust.Client.GameObjects;
@@ -13,6 +14,7 @@ using Robust.Client.State;
 using Robust.Client.UserInterface;
 using Robust.Client.UserInterface.Controls;
 using Robust.Client.UserInterface.CustomControls;
+using Robust.Shared.Configuration;
 using Robust.Shared.Console;
 using Robust.Shared.Graphics;
 using Robust.Shared.Input;
@@ -36,11 +38,11 @@ namespace Content.Client.Gameplay
         [Dependency] private IPlayerManager _playerManager = default!;
         [Dependency] private IEntitySystemManager _entitySystemManager = default!;
         [Dependency] private IGameTiming _timing = default!;
-        [Dependency] private IMapManager _mapManager = default!;
         [Dependency] protected IUserInterfaceManager UserInterfaceManager = default!;
         [Dependency] private IEntityManager _entityManager = default!;
         [Dependency] private IViewVariablesManager _vvm = default!;
         [Dependency] private IConsoleHost _conHost = default!;
+        [Dependency] private IConfigurationManager _configurationManager = default!;
 
         private ClickableEntityComparer _comparer = default!;
 
@@ -84,6 +86,8 @@ namespace Content.Client.Gameplay
             _comparer = new ClickableEntityComparer();
             CommandBinds.Builder
                 .Bind(ContentKeyFunctions.InspectEntity, new PointerInputCmdHandler(HandleInspect, outsidePrediction: true))
+                .Bind(ContentKeyFunctions.InspectServerComponent, new PointerInputCmdHandler(HandleInspectServerComponent, outsidePrediction: true))
+                .Bind(ContentKeyFunctions.InspectClientComponent, new PointerInputCmdHandler(HandleInspectClientComponent, outsidePrediction: true))
                 .Register<GameplayStateBase>();
         }
 
@@ -97,6 +101,21 @@ namespace Content.Client.Gameplay
         private bool HandleInspect(ICommonSession? session, EntityCoordinates coords, EntityUid uid)
         {
             _conHost.ExecuteCommand($"vv /c/enthover");
+            return true;
+        }
+
+        private bool HandleInspectServerComponent(ICommonSession? session, EntityCoordinates coords, EntityUid uid)
+        {
+            var component = _configurationManager.GetCVar(CCVars.DebugQuickInspect);
+            if (_entityManager.TryGetNetEntity(uid, out var net))
+                _conHost.ExecuteCommand($"vv /entity/{net.Value.Id}/{component}");
+            return true;
+        }
+
+        private bool HandleInspectClientComponent(ICommonSession? session, EntityCoordinates coords, EntityUid uid)
+        {
+            var component = _configurationManager.GetCVar(CCVars.DebugQuickInspect);
+            _conHost.ExecuteCommand($"vv /c/entity/{uid}/{component}");
             return true;
         }
 
@@ -142,7 +161,6 @@ namespace Content.Client.Gameplay
 
             // Check the entities against whether or not we can click them
             var foundEntities = new List<(EntityUid, int, uint, float)>(entities.Count);
-            var clickQuery = _entityManager.GetEntityQuery<ClickableComponent>();
             var clickables = _entityManager.System<ClickableSystem>();
 
             foreach (var entity in entities)
@@ -151,8 +169,7 @@ namespace Content.Client.Gameplay
                 if (!ignoreInteractionTransparency && _entitySystemManager.GetEntitySystem<RMCClientInteractionSystem>().IsInteractionTransparency(entity.Uid, _playerManager.LocalEntity, eye))
                     continue;
 
-                if (clickQuery.TryGetComponent(entity.Uid, out var component) &&
-                    clickables.CheckClick((entity.Uid, component, entity.Component, entity.Transform), coordinates.Position, eye, excludeFaded, out var drawDepthClicked, out var renderOrder, out var bottom))
+                if (clickables.CheckClick((entity.Uid, null, entity.Component, entity.Transform), coordinates.Position, eye, excludeFaded, out var drawDepthClicked, out var renderOrder, out var bottom))
                 {
                     foundEntities.Add((entity.Uid, drawDepthClicked, renderOrder, bottom));
                 }
@@ -167,7 +184,7 @@ namespace Content.Client.Gameplay
             return foundEntities.Select(a => a.Item1);
         }
 
-        private sealed partial class ClickableEntityComparer : IComparer<(EntityUid clicked, int depth, uint renderOrder, float bottom)>
+        private sealed class ClickableEntityComparer : IComparer<(EntityUid clicked, int depth, uint renderOrder, float bottom)>
         {
             public int Compare((EntityUid clicked, int depth, uint renderOrder, float bottom) x,
                 (EntityUid clicked, int depth, uint renderOrder, float bottom) y)

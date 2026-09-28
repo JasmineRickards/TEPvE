@@ -6,6 +6,7 @@ using Content.Shared._RMC14.Warps;
 using Content.Shared._RMC14.Xenonids.Construction;
 using Content.Shared.Coordinates;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Components;
 using Content.Shared.GameTicking;
 using Content.Shared.Maps;
 using Content.Shared.Popups;
@@ -94,6 +95,16 @@ public sealed partial class AreaSystem : EntitySystem
         areaGrid.Areas[position] = area;
 
         EnsureAreaEntityExists(areaGrid, area);
+    }
+
+    public bool RemoveArea(AreaGridComponent areaGrid, Vector2i position)
+    {
+        if (!areaGrid.Areas.Remove(position))
+            return false;
+
+        areaGrid.Colors.Remove(position);
+        areaGrid.Labels.Remove(position);
+        return true;
     }
 
     public bool SetAlwaysPowered(Entity<AreaComponent> area, bool alwaysPowered)

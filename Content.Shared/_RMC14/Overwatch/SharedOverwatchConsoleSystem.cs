@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Numerics;
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
 using Content.Shared._RMC14.Areas;
 using Content.Shared._RMC14.ARES;
 using Content.Shared._RMC14.ARES.Logs;
@@ -22,6 +23,7 @@ using Content.Shared._RMC14.Xenonids;
 using Content.Shared.Administration.Logs;
 using Content.Shared.Chat;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Damage.Prototypes;
 using Content.Shared.Database;
 using Content.Shared.FixedPoint;
@@ -67,6 +69,7 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
     [Dependency] private IGameTiming _timing = default!;
     [Dependency] private SharedTransformSystem _transform = default!;
     [Dependency] private SharedUserInterfaceSystem _ui = default!;
+    [Dependency] private CMUSharedZLevelsSystem _zLevels = default!;
 
     private EntityQuery<ActorComponent> _actor;
     private EntityQuery<MobStateComponent> _mobStateQuery;
@@ -86,6 +89,13 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
     private readonly HashSet<Entity<SquadTeamComponent>> _toRemove = new();
 
     private static readonly EntProtoId<ARESLogTypeComponent> LogCat = "ARESTabAnnouncementLogs";
+
+    // CMU14: Round setup can assign a loaded ship to either faction.
+    public void SetGroup(Entity<OverwatchConsoleComponent> console, string group)
+    {
+        console.Comp.Group = group;
+        Dirty(console);
+    }
 
     public override void Initialize()
     {
@@ -147,9 +157,13 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
     {
         var hasOrbital = ev.Cannon.Comp.Status == OrbitalCannonStatus.Chambered;
         var cannonFaction = ev.Cannon.Comp.Faction;
+        var cannonMap = Transform(ev.Cannon).MapID;
         var consoles = EntityQueryEnumerator<OverwatchConsoleComponent>();
         while (consoles.MoveNext(out var uid, out var console))
         {
+            if (!_zLevels.IsSameZNetwork(Transform(uid).MapID, cannonMap))
+                continue;
+
             if (!string.IsNullOrEmpty(cannonFaction) &&
                 !string.Equals(console.Group, cannonFaction, StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -162,9 +176,13 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
     private void OnOrbitalCannonLaunch(ref OrbitalCannonLaunchEvent ev)
     {
         var cannonFaction = ev.CannonFaction;
+        var cannonMap = Transform(ev.Cannon).MapID;
         var consoles = EntityQueryEnumerator<OverwatchConsoleComponent>();
         while (consoles.MoveNext(out var uid, out var console))
         {
+            if (!_zLevels.IsSameZNetwork(Transform(uid).MapID, cannonMap))
+                continue;
+
             if (!string.IsNullOrEmpty(cannonFaction) &&
                 !string.Equals(console.Group, cannonFaction, StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -421,46 +439,64 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
         if (args.Target == default || !TryGetEntity(args.Target, out var target))
             return;
 
-        Entity<OverwatchCameraComponent?> camera;
-        if (TryGetAccessibleMemberSquad(ent.Comp, target.Value, out _) &&
-            _inventory.TryGetInventoryEntity<OverwatchCameraComponent>(target.Value, out var marineCamera))
+        ToggleWatchFromConsole(ent, args.Actor, target.Value);
+    }
+
+    // CMU14: Tactical map shortcuts share the console's faction and equipment checks.
+    public bool TryGetWatchCamera(OverwatchConsoleComponent console, EntityUid target, out Entity<OverwatchCameraComponent?> camera)
+    {
+        if (TryGetAccessibleMemberSquad(console, target, out _) &&
+            _inventory.TryGetInventoryEntity<OverwatchCameraComponent>(target, out var marineCamera))
         {
             camera = marineCamera;
+            return true;
         }
-        else if (TryComp(target, out RMCOverwatchTripodCameraComponent? tripod) &&
+        if (TryComp(target, out RMCOverwatchTripodCameraComponent? tripod) &&
                  tripod.Deployed &&
                  tripod.Squad is { } tripodSquad &&
                  TryComp(tripodSquad, out SquadTeamComponent? tripodTeam) &&
-                 CanAccessSquad(ent.Comp, tripodTeam) &&
+                 CanAccessSquad(console, tripodTeam) &&
                  TryComp(target, out OverwatchCameraComponent? tripodCamera))
         {
-            camera = (target.Value, tripodCamera);
+            camera = (target, tripodCamera);
+            return true;
         }
-        else
-        {
-            return;
-        }
+        camera = default;
+        return false;
+    }
 
-        if (HasComp<ScopingComponent>(args.Actor))
+    public void ToggleWatchFromConsole(Entity<OverwatchConsoleComponent> console, EntityUid actor, EntityUid target)
+    {
+        if (!TryGetWatchCamera(console.Comp, target, out var camera))
+            return;
+
+        if (HasComp<ScopingComponent>(actor))
         {
             if (_net.IsServer)
             {
-                _popup.PopupCursor("You're too busy peering through optics.", args.Actor, PopupType.MediumCaution);
+                _popup.PopupCursor("You're too busy peering through optics.", actor, PopupType.MediumCaution);
             }
             return;
         }
 
         if (_net.IsServer &&
-            TryComp(args.Actor, out OverwatchWatchingComponent? watching) &&
+            TryComp(actor, out OverwatchWatchingComponent? watching) &&
             watching.Watching == camera.Owner &&
-            TryComp(args.Actor, out ActorComponent? actor) &&
-            TryComp(args.Actor, out EyeComponent? eye))
+            TryComp(actor, out ActorComponent? player) &&
+            TryComp(actor, out EyeComponent? eye))
         {
-            Unwatch((args.Actor, eye), actor.PlayerSession);
+            Unwatch((actor, eye), player.PlayerSession);
             return;
         }
 
-        Watch(args.Actor, camera);
+        Watch(actor, camera);
+    }
+
+    public void StopWatchingCamera(EntityUid actor, EntityUid camera)
+    {
+        if (TryComp(actor, out OverwatchWatchingComponent? watching) && watching.Watching == camera &&
+            TryComp(actor, out ActorComponent? player))
+            Unwatch(actor, player.PlayerSession);
     }
 
     private void OnOverwatchHideBui(Entity<OverwatchConsoleComponent> ent, ref OverwatchConsoleHideBuiMsg args)
@@ -529,7 +565,10 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
             return;
 
         if (!TryComp(ent, out SupplyDropComputerComponent? computer))
+        {
+            _popup.PopupCursor(Loc.GetString("rmc-supply-drop-not-operational"), args.Actor, PopupType.MediumCaution);
             return;
+        }
 
         _supplyDrop.TryLaunchSupplyDropPopup((ent, computer), args.Actor);
 
@@ -582,11 +621,20 @@ public abstract partial class SharedOverwatchConsoleSystem : EntitySystem
 
     private void OnOverwatchOrbitalLaunchBui(Entity<OverwatchConsoleComponent> ent, ref OverwatchConsoleOrbitalLaunchBuiMsg args)
     {
-        if (!ent.Comp.CanOrbitalBombardment)
+        if (_net.IsClient)
             return;
 
-        if (!_orbitalCannon.TryGetClosestCannon(ent, out var cannon, string.IsNullOrEmpty(ent.Comp.Group) ? null : ent.Comp.Group))
+        if (!ent.Comp.CanOrbitalBombardment)
+        {
+            _popup.PopupCursor(Loc.GetString("rmc-overwatch-orbital-unavailable"), args.Actor, PopupType.LargeCaution);
             return;
+        }
+
+        if (!_orbitalCannon.TryGetClosestCannon(ent, out var cannon, string.IsNullOrEmpty(ent.Comp.Group) ? null : ent.Comp.Group))
+        {
+            _popup.PopupCursor(Loc.GetString("rmc-overwatch-orbital-no-cannon"), args.Actor, PopupType.LargeCaution);
+            return;
+        }
 
         EntityUid squad = default;
         if (TryGetAccessibleSquad(ent.Comp, ent.Comp.Squad, out var accessibleSquad))

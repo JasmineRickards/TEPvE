@@ -17,10 +17,12 @@ using Content.Shared.Destructible;
 using Content.Shared.Buckle.Components;
 using Content.Shared.Buckle;
 using Content.Shared.Storage.EntitySystems;
+using Content.Shared.Storage.Components;
 using Content.Shared._RMC14.Xenonids.Acid;
 using Content.Shared._RMC14.Xenonids.Spray;
 using Robust.Shared.Audio.Systems;
 using Content.Shared.Ghost;
+using Content.Shared.Ghost.Components;
 using Robust.Shared.Physics.Collision.Shapes;
 
 namespace Content.Shared._RMC14.Deploy;
@@ -522,6 +524,7 @@ public sealed partial class RMCDeploySystem : EntitySystem
             if (setup.StorageOriginalEntity) //it is already stored inside the entity with such a flag, the entity itself will be deleted soon after that
             {
                 childComp.InShutdown = true; // this will really work only in the process of deleting the entity that stores the original entity, in other cases it does not matter
+                childComp.OriginalEntity = EntityUid.Invalid; // CMU14
                 Dirty(entity, childComp);
                 continue;
             }
@@ -532,6 +535,7 @@ public sealed partial class RMCDeploySystem : EntitySystem
                     continue;
 
                 childComp.InShutdown = true;
+                childComp.OriginalEntity = EntityUid.Invalid; // CMU14
                 Dirty(entity, childComp);
                 _toDelete.Add(entity);
             }
@@ -657,7 +661,8 @@ public sealed partial class RMCDeploySystem : EntitySystem
                     continue;
 
                 // Prevents abuse when folding entities in cabinets, etc.
-                _entityStorage.EmptyContents(childUid);
+                if (TryComp<EntityStorageComponent>(childUid, out var childStorage))
+                    _entityStorage.EmptyContents(childUid, childStorage);
 
                 // Unbuckle all entities strapped to the child entity
                 TryUnbuckleAll(childUid);

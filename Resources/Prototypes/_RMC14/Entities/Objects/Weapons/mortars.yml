@@ -7,7 +7,9 @@
   components:
   - type: GuideHelp
     guides:
-    - RMCGuideRoleMortar
+    # cmu edit start
+    - CMUGuideMortar
+    # cmu edit end
   - type: Sprite
     sprite: _RMC14/Objects/Weapons/mortar/classic.rsi
     layers:
@@ -45,6 +47,7 @@
     isCorrodible: false
   - type: Mortar
   - type: Damageable
+  - type: Injurable
     damageContainer: Inorganic
   - type: Destructible
     thresholds:
@@ -63,9 +66,10 @@
   - type: ActivatableUI
     key: enum.MortarUiKey.Key
   - type: RMCCameraComputer
-    protoIds:
-    - RMCMortarKit
     title: rmc-mortar-camera-title
+  - type: CameraNetworkReceiver
+    networks: [RMCMortarCamera]
+    supportedSources: Rmc
   - type: Appearance
   - type: GenericVisualizer
     visuals:
@@ -325,7 +329,9 @@
     drawFov: false
   - type: RMCStaticZoomLevel
   - type: RMCCamera
-    id: RMCMortarKit
+  - type: CameraNetworkMember
+    networks: [RMCMortarCamera]
+    sourceKinds: Rmc
   - type: MortarCamera
   - type: TimedDespawn
     lifetime: 180

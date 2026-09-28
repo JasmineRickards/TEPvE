@@ -19,7 +19,7 @@ using Content.Shared._RMC14.Xenonids.Hive;
 using Content.Shared._RMC14.Xenonids.Plasma;
 using Content.Shared._RMC14.Xenonids.Designer;
 using Content.Shared._RMC14.Xenonids.Designer.Events;
-using Content.Shared._AU14.Xenos;
+using Content.Shared.CMU14.Xenos;
 using Content.Shared._RMC14.Xenonids.Weeds;
 using Content.Shared.Actions;
 using Content.Shared.Actions.Events;
@@ -30,6 +30,8 @@ using Content.Shared.Climbing.Components;
 using Content.Shared.Coordinates;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Components;
+using Content.Shared.Damage.Systems;
 using Content.Shared.Database;
 using Content.Shared.Destructible;
 using Content.Shared.DoAfter;
@@ -68,11 +70,11 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
     [Dependency] private ISharedAdminLogManager _adminLogs = default!;
     [Dependency] private IComponentFactory _compFactory = default!;
     [Dependency] private DamageableSystem _damageable = default!;
+    [Dependency] private SharedDestructibleSystem _destructible = default!; // CMU14
     [Dependency] private SharedDoAfterSystem _doAfter = default!;
     [Dependency] private SharedGameTicker _gameTicker = default!;
     [Dependency] private SharedXenoHiveSystem _hive = default!;
     [Dependency] private EntityLookupSystem _entityLookup = default!;
-    [Dependency] private IMapManager _map = default!;
     [Dependency] private SharedMapSystem _mapSystem = default!;
     [Dependency] private INetManager _net = default!;
     [Dependency] private SharedPopupSystem _popup = default!;
@@ -234,7 +236,8 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         var doAfterEvent = new XenoOrderConstructionDoAfterEvent(ev.StructureId, ev.Target);
         var doAfter = new DoAfterArgs(EntityManager, user, construction.OrderConstructionDelay, doAfterEvent, user)
         {
-            BreakOnMove = true,
+            // CMU14: moving the remote eye must not interrupt the queen's construction.
+            BreakOnMove = !_queenEye.IsInQueenEye(user),
             BlockDuplicate = false,
         };
 
@@ -291,7 +294,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
 
     private void OnXenoPlantWeedsAction(Entity<XenoConstructionComponent> xeno, ref XenoPlantWeedsActionEvent args)
     {
-        var coordinates = _transform.GetMoverCoordinates(xeno).SnapToGrid(EntityManager, _map);
+        var coordinates = _transform.GetMoverCoordinates(xeno).SnapToGrid(EntityManager);
         if (_transform.GetGrid(coordinates) is not { } gridUid ||
             !TryComp(gridUid, out MapGridComponent? gridComp))
         {
@@ -475,7 +478,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
 
     private void HandleSecreteResinPlacement(Entity<XenoConstructionComponent> xeno, ref XenoSecreteStructureActionEvent args)
     {
-        var snapped = args.Target.SnapToGrid(EntityManager, _map);
+        var snapped = args.Target.SnapToGrid(EntityManager);
         var hasBoost = _queenBoostQuery.HasComp(xeno.Owner);
 
         if ((xeno.Comp.CanUpgrade || hasBoost) &&
@@ -592,7 +595,8 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         args.Handled = true;
         var doAfter = new DoAfterArgs(EntityManager, xeno, finalBuildTime, ev, xeno)
         {
-            BreakOnMove = true,
+            // CMU14: do-afters follow the effective mover, which may be the remote eye.
+            BreakOnMove = !_queenEye.IsInQueenEye(xeno.Owner),
             RootEntity = true,
             CancelDuplicate = false
         };
@@ -812,6 +816,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
                 }
             }
 
+            ClearResinObstructions(coordinates); // CMU14: only after validation and payment.
             var structure = Spawn(structureToSpawn, coordinates);
             _hive.SetSameHive(xeno.Owner, structure);
             if (TryComp(structure, out DesignNodeComponent? nodeComp))
@@ -967,7 +972,8 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         if (_net.IsClient)
             return;
 
-        var coordinates = target.SnapToGrid(EntityManager, _map);
+        var coordinates = target.SnapToGrid(EntityManager);
+        ClearResinObstructions(coordinates); // CMU14
         var structure = Spawn(args.StructureId, coordinates);
 
         _hive.SetSameHive(xeno.Owner, structure);
@@ -1122,7 +1128,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         if (GetCoordinates(args.Input.EntityCoordinatesTarget) is not { } target)
             return;
 
-        var snapped = target.SnapToGrid(EntityManager, _map);
+        var snapped = target.SnapToGrid(EntityManager);
 
         var adjustEv = new XenoSecreteStructureAdjustFields(snapped);
         RaiseLocalEvent(args.User, ref adjustEv);
@@ -1231,7 +1237,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
             return;
         }
 
-        if (xenoStructureDamage.TotalDamage <= 0)
+        if (_damageable.GetTotalDamage((xenoStructure, xenoStructureDamage)) <= 0)
         {
             var undamagedStructureMessage = Loc.GetString("rmc-xeno-construction-repair-structure-no-damage-failure", ("struct", xenoStructure.Owner));
             _popup.PopupClient(undamagedStructureMessage, xenoStructure.Owner.ToCoordinates(), user);
@@ -1272,7 +1278,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
             !TryComp(xenoStructure, out TransformComponent? xenoStructureTransform) ||
             !TryComp(user, out XenoPlasmaComponent? plasma) ||
             !TryComp(xenoStructure, out DamageableComponent? xenoStructureDamage) ||
-            xenoStructureDamage.TotalDamage <= 0)
+            _damageable.GetTotalDamage((xenoStructure, xenoStructureDamage)) <= 0)
         {
             return;
         }
@@ -1304,7 +1310,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
             return;
         }
 
-        _damageable.SetAllDamage(xenoStructure.Owner, xenoStructureDamage, 0);
+        _damageable.SetAllDamage((xenoStructure.Owner, xenoStructureDamage), FixedPoint2.Zero);
         var ev = new XenoStructureRepairedEvent();
         RaiseLocalEvent(xenoStructure, ev);
 
@@ -1488,14 +1494,38 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         return _turf.GetTileRef(target) is { } tile &&
                !_turf.IsSpace(tile) &&
                _turf.GetContentTileDefinition(tile).Sturdy &&
-               !_turf.IsTileBlocked(tile, Impassable) &&
+               !_turf.IsTileBlocked(tile.GridUid, tile.GridIndices, Impassable,
+                   ignore: uid => IsClearableOnTile(uid, tile)) && // CMU14
                !_xenoNest.HasAdjacentNestFacing(target);
+    }
+
+    // CMU14: do not clear neighboring vegetation whose fixture overlaps the construction tile.
+    private bool IsClearableOnTile(EntityUid uid, TileRef tile)
+        => HasComp<ResinClearableComponent>(uid) &&
+           _turf.GetTileRef(Transform(uid).Coordinates) is { } other &&
+           other.GridUid == tile.GridUid && other.GridIndices == tile.GridIndices &&
+           _destructible.CanDestroy(uid);
+
+    private void ClearResinObstructions(EntityCoordinates coordinates)
+    {
+        if (!_net.IsServer || _turf.GetTileRef(coordinates) is not { } tile)
+            return;
+
+        // Include fixtureless grass on tile edges; the exact tile check below excludes neighboring scenery.
+        var obstructions = new HashSet<EntityUid>();
+        _entityLookup.GetEntitiesIntersecting(tile.GridUid, _entityLookup.GetWorldBounds(tile), obstructions,
+            LookupFlags.Uncontained | LookupFlags.Approximate);
+        foreach (var uid in obstructions)
+        {
+            if (IsClearableOnTile(uid, tile))
+                _destructible.DestroyEntity(uid);
+        }
     }
 
     private bool InRangePopup(EntityUid xeno, EntityCoordinates target, float range, float minRange = 0, bool popup = true)
     {
         var origin = _transform.GetMoverCoordinates(xeno);
-        target = target.SnapToGrid(EntityManager, _map);
+        target = target.SnapToGrid(EntityManager);
         if (!_transform.InRange(origin, target, range))
         {
             if (popup)
@@ -1534,7 +1564,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
             return false;
         }
 
-        target = target.SnapToGrid(EntityManager, _map);
+        target = target.SnapToGrid(EntityManager);
         var hasBoost = _queenBoostQuery.HasComp(xeno.Owner);
 
         if (IsNearVehiclePopup(xeno, target, popup))
@@ -1619,6 +1649,9 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
 
                 return false;
             }
+
+            if (HasComp<ResinClearableComponent>(uid) && _destructible.CanDestroy(uid.Value)) // CMU14
+                continue;
 
             if (!HasComp<BarricadeComponent>(uid))
             {
@@ -2229,7 +2262,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
         if (_prototype.TryIndex(buildChoice, out var proto) && proto.HasComponent<DesignNodeComponent>())
             return 1f;
 
-        var snapped = target.SnapToGrid(EntityManager, _map);
+        var snapped = target.SnapToGrid(EntityManager);
         using var anchoredNodes = _rmcMap.GetAnchoredEntitiesEnumerator<DesignNodeComponent>(snapped);
         while (anchoredNodes.MoveNext(out var nodeUid))
         {
@@ -2264,7 +2297,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
                 return 1f;
         }
 
-        var snapped = target.SnapToGrid(EntityManager, _map);
+        var snapped = target.SnapToGrid(EntityManager);
         using var anchoredNodes = _rmcMap.GetAnchoredEntitiesEnumerator<DesignNodeComponent>(snapped);
         while (anchoredNodes.MoveNext(out var nodeUid))
         {
@@ -2309,7 +2342,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
                 return true;
         }
 
-        var snapped = target.SnapToGrid(EntityManager, _map);
+        var snapped = target.SnapToGrid(EntityManager);
         EntityUid? nodeUid = null;
         DesignNodeComponent? nodeComp = null;
 
@@ -2365,7 +2398,7 @@ public sealed partial class SharedXenoConstructionSystem : EntitySystem
                 return true;
         }
 
-        var snapped = target.SnapToGrid(EntityManager, _map);
+        var snapped = target.SnapToGrid(EntityManager);
         if (!_rmcMap.HasAnchoredEntityEnumerator<XenoStructureUpgradeableComponent>(snapped, out var upgradeable) ||
             upgradeable.Comp.To is not { } to ||
             !_prototype.HasIndex(to))

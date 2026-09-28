@@ -1,5 +1,5 @@
 using System.Linq;
-using Content.Shared._CMU14.ZLevels.Core.EntitySystems;
+using Content.Shared.CMU14.ZLevels.Core.EntitySystems;
 using Content.Shared._RMC14.Armor;
 using Content.Shared._RMC14.Chemistry;
 using Content.Shared._RMC14.Chemistry.Reagent;
@@ -7,6 +7,8 @@ using Content.Shared._RMC14.Emote;
 using Content.Shared._RMC14.Explosion;
 using Content.Shared._RMC14.Map;
 using Content.Shared._RMC14.OnCollide;
+// CMU14: fire growth and synthetic resistance.
+using Content.Shared._RMC14.Synth;
 using Content.Shared._RMC14.Weapons.Melee;
 using Content.Shared._RMC14.Xenonids.Plasma;
 using Content.Shared.Atmos;
@@ -15,6 +17,7 @@ using Content.Shared.Chemistry.EntitySystems;
 using Content.Shared.Chemistry.Reagent;
 using Content.Shared.Coordinates.Helpers;
 using Content.Shared.Damage;
+using Content.Shared.Damage.Components;
 using Content.Shared.Damage.Prototypes;
 using Content.Shared.Damage.Systems;
 using Content.Shared.Directions;
@@ -52,7 +55,6 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
     [Dependency] private SharedDoAfterSystem _doAfter = default!;
     [Dependency] private EntityWhitelistSystem _entityWhitelist = default!;
     [Dependency] private SharedHandsSystem _hands = default!;
-    [Dependency] private IMapManager _map = default!;
     [Dependency] private INetManager _net = default!;
     [Dependency] private SharedOnCollideSystem _onCollide = default!;
     [Dependency] private SharedPhysicsSystem _physics = default!;
@@ -74,6 +76,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
 
     private static readonly ProtoId<ReagentPrototype> WaterReagent = "Water";
     private static readonly ProtoId<TagPrototype> StructureTag = "Structure";
+    private readonly List<EntityUid> _igniteContacts = new(); // CMU14: igniting anchors new fire on the tile, mutating the anchored set mid-enumeration
     private static readonly ProtoId<TagPrototype> WallTag = "Wall";
     private static readonly ProtoId<DamageTypePrototype> HeatDamage = "Heat";
 
@@ -146,6 +149,13 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
     private void OnTileFireMapInit(Entity<TileFireComponent> ent, ref MapInitEvent args)
     {
         ent.Comp.SpawnedAt = _timing.CurTime;
+        // CMU14: fire growth and synthetic resistance.
+        if (ent.Comp.GrowthDuration > TimeSpan.Zero && TryComp(ent, out RMCIgniteOnCollideComponent? ignition))
+        {
+            ent.Comp.MatureIntensity = ignition.Intensity;
+            UpdateFireGrowth(ent, 0);
+            _appearance.SetData(ent, TileFireLayers.Base, TileFireVisuals.One);
+        }
         Dirty(ent);
     }
 
@@ -154,20 +164,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         if (_net.IsClient)
             return;
 
-        var water = false;
-        foreach (var container in args.Solution.Comp.Containers)
-        {
-            if (!_solutionContainer.TryGetSolution(args.Solution.Owner, container, out _, out var solution))
-                continue;
-
-            if (solution.ContainsPrototype(WaterReagent))
-            {
-                water = true;
-                break;
-            }
-        }
-
-        if (!water)
+        if (!args.Solution.Comp.Solution.ContainsPrototype(WaterReagent))
             return;
 
         if (ent.Comp.ExtinguishInstantly)
@@ -194,14 +191,12 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         patter.Last = time;
         Dirty(user, patter);
 
-        ent.Comp.CurrentPats++;
-        if (ent.Comp.CurrentPats >= ent.Comp.PatsToExtinguish)
+        // The pat counter is server-only; prediction replays must not advance it or delete networked fire.
+        if (_net.IsServer)
         {
-            QueueDel(ent);
-        }
-        else
-        {
-            Dirty(ent);
+            ent.Comp.CurrentPats++;
+            if (ent.Comp.CurrentPats >= ent.Comp.PatsToExtinguish)
+                QueueDel(ent);
         }
 
         _rmcMelee.DoLunge(user, ent);
@@ -280,7 +275,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         var coords = _transform.GetMoverCoordinates(ent);
         _audio.PlayPvs(ent.Comp.Sound, coords);
 
-        var tile = coords.SnapToGrid(EntityManager, _map);
+        var tile = coords.SnapToGrid(EntityManager);
         SpawnFireDiamond(ent.Comp.Spawn, tile, ent.Comp.Range, ent.Comp.Intensity, ent.Comp.Duration);
         QueueDel(ent);
     }
@@ -308,7 +303,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
 
     private void OnTileFireOnTriggerExplosive(Entity<TileFireOnTriggerComponent> ent, ref CMExplosiveTriggeredEvent args)
     {
-        var coords = _transform.GetMoverCoordinates(ent).SnapToGrid(EntityManager, _map);
+        var coords = _transform.GetMoverCoordinates(ent).SnapToGrid(EntityManager);
         SpawnFireDiamond(ent.Comp.Spawn, coords, ent.Comp.Range, ent.Comp.Intensity, ent.Comp.Duration);
     }
 
@@ -341,7 +336,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         if (args.Target != ent.Owner ||
             user == args.Target ||
             !TryComp(user, out FirePatterComponent? patter) ||
-            _entityWhitelist.IsBlacklistPass(patter.Blacklist, ent) ||
+            _entityWhitelist.IsWhitelistPass(patter.Blacklist, ent) ||
             !TryComp(ent, out FlammableComponent? flammable) ||
             !flammable.OnFire)
         {
@@ -411,13 +406,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         if (intensity != null || duration != null)
         {
             var ignite = EnsureComp<RMCIgniteOnCollideComponent>(spawned);
-            if (intensity != null)
-                ignite.Intensity = intensity.Value;
-
-            if (duration != null)
-                ignite.Duration = duration.Value;
-
-            Dirty(spawned, ignite);
+            SetIntensityDuration((spawned, ignite, null), intensity, duration);
         }
 
         var onCollide = EnsureComp<DamageOnCollideComponent>(spawned);
@@ -479,7 +468,9 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         SpawnFires(spawn, center, range, chain, intensity, duration, zProjectionMaxFloors, canSpawn);
     }
 
-    public void SpawnFireLines(EntProtoId spawn, EntityCoordinates center, int cardinalRange, int ordinalRange, int? intensity = null, int? duration = null)
+    // CMU14: fire growth and synthetic resistance.
+    public void SpawnFireLines(EntProtoId spawn, EntityCoordinates center, int cardinalRange, int ordinalRange, int? intensity = null, int? duration = null,
+        Func<EntityCoordinates, bool>? canSpawn = null)
     {
         var chain = _onCollide.SpawnChain();
         var spawned = new HashSet<EntityCoordinates>();
@@ -493,7 +484,8 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
                 if (!spawned.Add(target))
                     continue;
 
-                nextRange = SpawnFire(target, spawn, chain, nextRange, intensity, duration, out var cont);
+                // CMU14: fire growth and synthetic resistance.
+                nextRange = SpawnFire(target, spawn, chain, nextRange, intensity, duration, out var cont, canSpawn: canSpawn);
                 target = target.Offset(direction);
                 if (cont)
                     break;
@@ -821,6 +813,14 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         }
     }
 
+    // CMU14: fire growth and synthetic resistance.
+    /// <summary>Fire bypasses worn armor, but must respect a synthetic body's heat resistance.</summary>
+    public void DamageFromFire(EntityUid target, DamageSpecifier damage, bool interruptsDoAfters = true, EntityUid? origin = null)
+    {
+        _damageable.TryChangeDamage(target, damage, ignoreResistances: !HasComp<SynthComponent>(target),
+            interruptsDoAfters: interruptsDoAfters, origin: origin);
+    }
+
     private void TryIgnite(Entity<RMCIgniteOnCollideComponent> ent, EntityUid other, bool checkIgnited)
     {
         // This will ignite too much during hijack otherwise, including fires
@@ -864,7 +864,8 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         }
 
         if (!wasOnFire && IsOnFire(flammableEnt) && CanFireBypassImmunity(ent, other))
-            _damageable.TryChangeDamage(flammableEnt, flammableEnt.Comp.Damage * ent.Comp.Intensity, true);
+            // CMU14: fire growth and synthetic resistance.
+            DamageFromFire(other, flammableEnt.Comp.Damage * ent.Comp.Intensity);
     }
 
     private void ApplyTileEffect(Entity<SteppingOnFireComponent> ent, RMCIgniteOnCollideComponent ignite, EntityUid fireEntity)
@@ -883,7 +884,6 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
             stepping.ArmorMultiplier = ignite.ArmorMultiplier;
             if (TryComp<RMCFireArmorDebuffModifierComponent>(uid, out var mod))
                 stepping.ArmorMultiplier *= mod.DebuffModifier;
-            _armor.UpdateArmorValue((uid, null));
         }
 
         var coords = _transform.GetMoverCoordinates(uid);
@@ -895,7 +895,8 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
             {
                 stepping.Distance = 0;
                 if (CanFireBypassImmunity(fireEntity, uid))
-                    _damageable.TryChangeDamage(uid, tile * ignite.Intensity, true);
+                    // CMU14: fire growth and synthetic resistance.
+                    DamageFromFire(uid, tile * ignite.Intensity);
             }
         }
 
@@ -933,7 +934,8 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
 
             if (ent.Comp.UpdateAt <= timing)
             {
-                _damageable.TryChangeDamage(uid, ignite.Intensity / 5f * flammable.Damage * ev.Multiplier, true, false);
+                // CMU14: fire growth and synthetic resistance.
+                DamageFromFire(uid, ignite.Intensity / 5f * flammable.Damage * ev.Multiplier, interruptsDoAfters: false);
                 ent.Comp.UpdateAt = timing + ent.Comp.UpdateTime;
             }
         }
@@ -996,10 +998,11 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
             while (applyQuery.MoveNext(out var uid, out var apply))
             {
                 var enumerator = _rmcMap.GetAnchoredEntitiesEnumerator(uid);
+                _igniteContacts.Clear(); // CMU14: snapshot the tile, igniting mutates the anchored set
                 while (enumerator.MoveNext(out var contact))
-                {
+                    _igniteContacts.Add(contact);
+                foreach (var contact in _igniteContacts)
                     TryIgnite((uid, apply), contact, true);
-                }
 
                 if (apply.InitDamaged)
                     continue;
@@ -1037,7 +1040,15 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
                     continue;
                 }
 
-                if (time < fire.SpawnedAt + fire.BigFireDuration)
+                // CMU14: fire growth and synthetic resistance.
+                var age = time - fire.SpawnedAt;
+                var growing = fire.GrowthDuration > TimeSpan.Zero && age < fire.GrowthDuration;
+                if (fire.MatureIntensity != null)
+                    UpdateFireGrowth((uid, fire), (float) (age.TotalSeconds / Math.Max(.001, fire.GrowthDuration.TotalSeconds)));
+                if (growing)
+                    _appearance.SetData(uid, TileFireLayers.Base,
+                        age < fire.GrowthDuration / 2 ? TileFireVisuals.One : TileFireVisuals.Two);
+                else if (time < fire.SpawnedAt + fire.BigFireDuration)
                     _appearance.SetData(uid, TileFireLayers.Base, TileFireVisuals.Four);
                 else if (timeLeft < TimeSpan.FromSeconds(9))
                     _appearance.SetData(uid, TileFireLayers.Base, TileFireVisuals.One);
@@ -1051,6 +1062,16 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
         {
             Log.Error($"Error processing {nameof(TileFireComponent)}:\n{e}");
         }
+    }
+
+    // CMU14: fire growth and synthetic resistance.
+    private void UpdateFireGrowth(Entity<TileFireComponent> fire, float progress)
+    {
+        if (fire.Comp.MatureIntensity is not { } mature) return;
+        var intensity = Math.Max(1, (int) MathF.Ceiling(mature * (.15f + .85f * Math.Clamp(progress, 0, 1))));
+        if (TryComp(fire, out RMCIgniteOnCollideComponent? ignition) && ignition.Intensity != intensity)
+            SetIntensityDuration((fire, ignition, null), intensity, null);
+        if (progress >= 1) fire.Comp.MatureIntensity = null;
     }
 
     private void RunExtinguishFire()
@@ -1124,6 +1145,7 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
             var steppingQuery = EntityQueryEnumerator<SteppingOnFireComponent, PhysicsComponent>();
             while (steppingQuery.MoveNext(out var uid, out var stepping, out var body))
             {
+                var previousArmorMultiplier = stepping.ArmorMultiplier;
                 stepping.ArmorMultiplier = 1;
                 Dirty(uid, stepping);
 
@@ -1152,6 +1174,8 @@ public abstract partial class SharedRMCFlammableSystem : EntitySystem
 
                 if (!isStepping)
                     RemCompDeferred<SteppingOnFireComponent>(uid);
+                else if (stepping.ArmorMultiplier != previousArmorMultiplier)
+                    _armor.UpdateArmorValue((uid, null));
             }
         }
         catch (Exception e)

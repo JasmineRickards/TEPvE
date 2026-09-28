@@ -1,6 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
-using Content.Shared._CMU14.Round.Objectives.Component;
+using Content.Shared.CMU14.Round.Objectives.Components;
 using Content.Shared._RMC14.Areas;
 using Content.Shared._RMC14.ARES;
 using Content.Shared._RMC14.ARES.Logs;
@@ -21,6 +21,7 @@ using Content.Shared.Examine;
 using Content.Shared.FixedPoint;
 using Content.Shared.GameTicking;
 using Content.Shared.Ghost;
+using Content.Shared.Ghost.Components;
 using Content.Shared.Interaction;
 using Content.Shared.Interaction.Events;
 using Content.Shared.Mobs;
@@ -30,6 +31,7 @@ using Content.Shared.NameModifier.EntitySystems;
 using Content.Shared.Popups;
 using Content.Shared.Random.Helpers;
 using Content.Shared.Storage;
+using Content.Shared.Storage.Components;
 using Content.Shared.Storage.EntitySystems;
 using Robust.Shared.Audio.Systems;
 using Robust.Shared.Configuration;
@@ -80,10 +82,10 @@ public sealed partial class IntelSystem : EntitySystem
 
     // Team-specific tech tree prototype ids (convenience constants).
     // Use these when you want to reference a specific team's tech-tree proto in code.
-    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoGovfor = "RMCIntelTechTree_govfor";
-    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoOpfor = "RMCIntelTechTree_opfor";
-    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoClf = "RMCIntelTechTree_clf";
-    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoScientist = "RMCIntelTechTree_clf";
+    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoGovfor = "CMUIntelTechTree_GOVFOR"; // CMU14
+    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoOpfor = "CMUIntelTechTree_OPFOR"; // CMU14
+    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoClf = "CMUIntelTechTree_CLF"; // CMU14
+    private static readonly EntProtoId<IntelTechTreeComponent> TechTreeProtoScientist = "CMUIntelTechTree_CLF"; // CMU14: WeYu Tech
 
     private static readonly EntProtoId PaperScrapProto = "RMCIntelPaperScrap";
     private static readonly EntProtoId ProgressReportProto = "RMCIntelProgressReport";
@@ -375,7 +377,7 @@ public sealed partial class IntelSystem : EntitySystem
         AddPoints(tree, ent.Comp.Value, team);
 
         var knowledge = EnsureComp<IntelKnowledgeComponent>(user);
-        knowledge.Read.Add(ent);
+        knowledge.ReadIntel.Add(ent);
         Dirty(user, knowledge);
 
         var read = EnsureComp<IntelReadComponent>(ent);
@@ -506,7 +508,7 @@ public sealed partial class IntelSystem : EntitySystem
 
     private void OnKnowledgeRemove<T>(Entity<IntelKnowledgeComponent> ent, ref T args)
     {
-        foreach (var read in ent.Comp.Read)
+        foreach (var read in ent.Comp.ReadIntel)
         {
             if (TerminatingOrDeleted(read))
                 continue;
@@ -528,7 +530,7 @@ public sealed partial class IntelSystem : EntitySystem
 
             if (TryComp(reader, out IntelKnowledgeComponent? knowledge))
             {
-                knowledge.Read.Remove(ent);
+                knowledge.ReadIntel.Remove(ent);
                 Dirty(reader, knowledge);
             }
         }
@@ -542,7 +544,7 @@ public sealed partial class IntelSystem : EntitySystem
 
         var msg = "You start typing in intel into the computer...";
         if (!TryComp(args.User, out IntelKnowledgeComponent? knowledge) ||
-            !knowledge.Read.TryFirstOrNull(out var read))
+            !knowledge.ReadIntel.TryFirstOrNull(out var read))
         {
             msg += " and you have nothing new to add...";
             _popup.PopupClient(msg, ent, args.User, PopupType.Medium);
@@ -607,7 +609,7 @@ public sealed partial class IntelSystem : EntitySystem
             !TryComp(intel, out IntelUnlocksComponent? unlocks) ||
             !unlocks.Unlocks.TryFirstOrNull(out var unlock))
         {
-            if (!knowledge.Read.TryFirstOrNull(out intel))
+            if (!knowledge.ReadIntel.TryFirstOrNull(out intel))
             {
                 StopPopup(ref args);
                 return;
@@ -617,7 +619,7 @@ public sealed partial class IntelSystem : EntitySystem
             if (!TryComp(intel, out unlocks) ||
                 !unlocks.Unlocks.TryFirstOrNull(out unlock))
             {
-                knowledge.Read.Remove(intel.Value);
+                knowledge.ReadIntel.Remove(intel.Value);
                 args.Repeat = true;
                 return;
             }
@@ -645,7 +647,7 @@ public sealed partial class IntelSystem : EntitySystem
         _audio.PlayPvs(ent.Comp.TypingSound, ent);
 
         if (unlocks.Unlocks.Count == 0)
-            knowledge.Read.Remove(intel.Value);
+            knowledge.ReadIntel.Remove(intel.Value);
 
         if (unlocks.Unlocks.Count == 0)
         {
@@ -712,7 +714,8 @@ public sealed partial class IntelSystem : EntitySystem
                 {
                     break;
                 }
-                else if (_entityStorage.Insert(intel, nearby))
+                else if (TryComp(nearby, out EntityStorageComponent? entityStorage) &&
+                         _entityStorage.Insert(intel, nearby, entityStorage))
                 {
                     break;
                 }
